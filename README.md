@@ -93,8 +93,42 @@ npm run sim:soak   # 500 deterministic ticks + invariant + replay checks
 npm run dev        # local worker
 ```
 
+## Playing
+
+A host creates a campaign and gets an invite link. Everyone else opens it,
+signs in with their email, and names a character. From then on the story
+arrives by email and you reply to it; the web app is there if you want it.
+
+A turn resolves when **a quorum of players has acted or the deadline passes**,
+whichever comes first — so an eager group moves fast and a slow group still
+moves. Quorum counts only players who are currently present, or a half-dormant
+group could never reach it.
+
+Between turns there is optional depth: downtime, in-character letters, and
+private scenes that join the chronicle. None of it changes your attributes or
+skills, and the tests enforce that — a bonus for showing up is a penalty for
+not showing up, just written the other way round.
+
 ## Status
 
-In active development against `docs/specs/2026-08-02-asyncrpg-design.md`, gated
-by an independent third-party critic that scores five rubric categories on
-every deploy. Not yet playable end to end.
+Deployed at [play.cortech.online](https://play.cortech.online) and playable end
+to end. A public demo chronicle lives at
+[/c/demo](https://play.cortech.online/c/demo).
+
+Development is gated by an independent third-party critic (`codex`, fresh
+context, read-only sandbox) that scores five rubric categories against a clean
+clone plus a live-capture bundle on every cycle. The bar is every category ≥ 8
+on two consecutive cycles.
+
+| Gate | What it proves |
+|---|---|
+| `npm test` | 167 tests, including the absence promise and the world invariants |
+| `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
+| `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
+| `scripts/email-e2e.mjs` | 15 checks on live mail configuration and real outbound delivery |
+
+`scripts/email-e2e.mjs` states plainly which hop it does **not** cover (the
+inbound SMTP delivery itself) rather than implying end-to-end proof it cannot
+provide; that path's logic is covered by
+`test/integration/email-handler.test.ts`.
