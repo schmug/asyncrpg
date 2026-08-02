@@ -45,7 +45,10 @@ an **undocumented** one fails the suite.
 ### 1. HSTS is disabled at the zone
 
 - The app sends `strict-transport-security: max-age=31536000; includeSubDomains`.
-- Production serves `max-age=0`.
+- Production serves `max-age=0; includeSubDomains; preload` — the zone rewrites
+  the max-age to zero and appends its own directives. The smoke gate matches on
+  `max-age=0` rather than the whole string, because the tail Cloudflare emits
+  has already changed once; a zero max-age is the substantive deviation.
 - The `cortech.online` zone has HSTS off, and the zone setting wins.
 - **To fix:** Cloudflare dashboard → SSL/TLS → Edge Certificates → HTTP Strict
   Transport Security → enable, max-age 12 months, include subdomains.

@@ -147,8 +147,11 @@ async function main() {
   const ZONE_DEVIATIONS = {
     "strict-transport-security": {
       intended: "max-age=31536000; includeSubDomains",
-      served: "max-age=0",
-      why: "HSTS is disabled at the cortech.online zone; the zone setting wins over the app header.",
+      // Matched on the substantive directive rather than the whole string: the
+      // zone rewrites the max-age and appends its own directives, and the
+      // exact tail it emits has already changed once. What makes this a known
+      // deviation is that max-age is zero; the rest is Cloudflare's cosmetics.
+      known: (v) => /(^|;|\s)max-age=0(\s*;|\s*$)/.test(v),
       owner: "domain owner — enable HSTS in SSL/TLS → Edge Certificates",
     },
   };
@@ -157,13 +160,14 @@ async function main() {
     if (live === d.intended) {
       check(`${header} matches intended policy`, true, "zone override no longer applies");
     } else {
+      const known = d.known(live);
       check(
         `${header} drift is the known, documented one`,
-        live === d.served,
-        live === d.served
+        known,
+        known
           ? `serving "${live}", app intends "${d.intended}" — ${d.owner}`
-          : `UNDOCUMENTED drift: serving "${live}", expected either the intended ` +
-            `"${d.intended}" or the known override "${d.served}"`,
+          : `UNDOCUMENTED drift: serving "${live}", app intends "${d.intended}" — ` +
+            `this is neither the intended policy nor the documented zone override`,
       );
     }
   }
@@ -531,6 +535,26 @@ async function main() {
     if (r.status === 429) limited = true;
   }
   check("sign-in requests are rate limited", limited);
+
+  // Proving the limiter works leaves it tripped, and the limiter keys on IP —
+  // so the next suite to run from this machine (ui-smoke, which has to sign in
+  // to do anything) gets a 429 and reports it as a console error. That reads
+  // as a broken product when it is really this suite failing to clean up after
+  // itself, exactly like the D1 rows it already removes. Wait for the window
+  // to roll over before handing the machine on.
+  if (limited) {
+    process.stdout.write("  ...waiting out the sign-in rate limit window ");
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      process.stdout.write(".");
+      const probe = await req("/api/auth/request", {
+        method: "POST",
+        body: { email: `${SMOKE_PREFIX}+drain-${stamp}@example.invalid` },
+      });
+      if (probe.status !== 429) break;
+    }
+    console.log(" clear");
+  }
 
   const methodNotAllowed = await req(`/api/campaigns/${slug}/action`, { cookie: host.cookie });
   check("wrong method is refused", methodNotAllowed.status === 405 || methodNotAllowed.status === 404);
