@@ -88,6 +88,10 @@ async function main() {
       `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
       `DELETE FROM reply_bindings WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
       `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
+      `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
+      `DELETE FROM downtime WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
+      `DELETE FROM letters WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
+      `DELETE FROM journals WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug='${esc(SLUG)}');` +
       `DELETE FROM campaigns WHERE slug='${esc(SLUG)}';`,
   );
 
@@ -108,11 +112,15 @@ async function main() {
     cookie: host.cookie,
     body: { name: host.name, concept: host.concept },
   });
+  // Joining is invite-only, so the demo walks the same path a real group does.
+  const invite = await req(`/api/campaigns/${SLUG}/invite`, { method: "POST", cookie: host.cookie });
+  if (invite.status !== 200) throw new Error(`invite failed: ${invite.text}`);
+  const token = (invite.json?.url ?? "").split("/join/")[1] ?? "";
   for (const p of players.slice(1)) {
-    const joined = await req(`/api/campaigns/${SLUG}/join`, {
+    const joined = await req("/api/join", {
       method: "POST",
       cookie: p.cookie,
-      body: { name: p.name, concept: p.concept },
+      body: { token, name: p.name, concept: p.concept },
     });
     if (joined.status !== 200) throw new Error(`join failed for ${p.label}: ${joined.text}`);
   }

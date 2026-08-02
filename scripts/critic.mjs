@@ -72,6 +72,12 @@ writeFileSync(
     `\n$ npm test\n${tryRun("npm", ["test"])}`,
     `\n$ gh run list (GitHub Actions CI)\n${tryRun("gh", ["run", "list", "--limit", "10"])}`,
     `\n$ git log --oneline -20\n${tryRun("git", ["log", "--oneline", "-20"])}`,
+    // Cycle 1 produced a false finding because the cloned repo and the live
+    // deployment were different revisions: the smoke suite in the clone
+    // asserted behavior the deployment had already changed. Record both so a
+    // skew is visible rather than mistaken for a product defect.
+    `\n$ git status --porcelain (uncommitted changes in the working tree)\n${tryRun("git", ["status", "--porcelain"], 30_000) || "(clean)"}`,
+    `\n$ wrangler deployments list (what is actually serving ${BASE})\n${tryRun("npx", ["wrangler", "deployments", "list"], 120_000)}`,
   ].join("\n"),
 );
 
