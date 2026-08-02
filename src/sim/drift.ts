@@ -303,7 +303,7 @@ function renewWorld(state: WorldState, rng: Rng, log: EventLog, forge: NameForge
   const vacuumPressure = alive.length <= 1 ? 0.05 : alive.length === 2 ? 0.02 : 0.004;
   if ((unclaimed.length > 0 || alive.length <= 1) && rng.chance(vacuumPressure)) {
     const kind = rng.pick(FACTION_KINDS);
-    const id = `fac_${Object.keys(state.factions).length}`;
+    const id = log.nextId("fac");
     const standing = Object.values(state.settlements).filter((s) => !s.razed);
     // Every settlement can be a ruin at once; there is then nothing to claim.
     const seat = unclaimed.length > 0 ? rng.pick(unclaimed) : standing.length > 0 ? rng.pick(standing) : null;
@@ -342,7 +342,7 @@ function renewWorld(state: WorldState, rng: Rng, log: EventLog, forge: NameForge
   // sprouts a new menace every month teaches players that none of them matter.
   if (liveThreats.length < 3 && rng.chance(liveThreats.length === 0 ? 0.045 : 0.008)) {
     const kind = rng.pick(THREAT_KINDS);
-    const id = `thr_${Object.keys(state.threats).length}`;
+    const id = log.nextId("thr");
     const regionIds = Object.keys(state.regions);
     if (regionIds.length > 0) {
       const regionId = rng.pick(regionIds);
@@ -615,7 +615,7 @@ export function driftWorld(
       });
       if (faction && !faction.defunct && npcRng.chance(0.6)) {
         const successor = {
-          id: `npc_${state.year}_${Object.keys(state.npcs).length}`,
+          id: log.nextId("npc"),
           name: forge.person(npcRng),
           role: npc.role,
           factionId: faction.id,

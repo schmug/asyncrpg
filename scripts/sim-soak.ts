@@ -15,6 +15,7 @@ import { joinCharacter } from "../src/sim/character";
 import { generateWorld } from "../src/sim/genesis";
 import { checkWorldInvariants } from "../src/sim/invariants";
 import { Rng, seedFrom } from "../src/sim/prng";
+import { pruneWorld } from "../src/sim/prune";
 import { DEFAULT_CAMPAIGN_CONFIG, runTick } from "../src/sim/tick";
 import type { ActionKind, PlayerAction, WorldEvent, WorldState } from "../src/sim/types";
 
@@ -83,6 +84,9 @@ function play(id: string, n: number): { state: WorldState; events: WorldEvent[];
       history: events,
     });
     events.push(...result.events);
+    // Exercise the same bounding the Durable Object applies, so the soak
+    // measures the state size a real campaign would actually persist.
+    pruneWorld(state);
 
     const violations = checkWorldInvariants(state);
     if (violations.length > 0) {
@@ -137,6 +141,21 @@ console.log(
   `  absent player  : presence=${quitter.presence} renown=${quitter.renown.toFixed(1)} ` +
     `conditions=[${quitter.conditions.join(", ")}] — unpenalised`,
 );
+
+// An endless campaign has to fit in a Durable Object row forever. Unbounded
+// growth here is a slow-motion outage, so the soak fails on it rather than
+// reporting it.
+const stateBytes = JSON.stringify(state).length;
+const STATE_CEILING = 500_000;
+console.log(
+  `  state size     : ${(stateBytes / 1024).toFixed(1)} KiB ` +
+    `(${Object.keys(state.npcs).length} npcs, ${Object.keys(state.factions).length} factions, ` +
+    `${Object.keys(state.threats).length} threats)`,
+);
+if (stateBytes > STATE_CEILING) {
+  console.error(`\nFAIL: world state grew to ${stateBytes} bytes, over the ${STATE_CEILING} ceiling`);
+  process.exit(1);
+}
 
 if (!quiet) {
   console.log(`\nmost significant moments:`);
