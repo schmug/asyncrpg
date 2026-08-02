@@ -223,7 +223,20 @@ async function main() {
   // share; this asserts it against what is actually being served, because the
   // validator only covers beats written *after* it shipped.
   const demo = await req("/c/demo");
-  const prose = demo.text.replace(/<[^>]*>/g, " ");
+  // Only the narrated beats. Stripping tags across the whole document leaves
+  // the inline stylesheet behind as text, and CSS is full of things that look
+  // exactly like a splice ("ol.tl{...}") — the check would fail on every run
+  // for a reason that has nothing to do with prose.
+  const prose = [...demo.text.matchAll(/<article class="beat">([\s\S]*?)<\/article>/g)]
+    .map((m) => m[1].replace(/<[^>]*>/g, " "))
+    .join("\n");
+  // Without this, an extraction that matched nothing would make all three
+  // checks below pass on an empty string and read as clean.
+  check(
+    "the public chronicle actually contains beats to check",
+    prose.length > 500,
+    `${prose.length} chars of prose extracted`,
+  );
   const splice = /[a-z]{2}[.!?][A-Za-z0-9]/.exec(prose);
   check(
     "the public chronicle is free of spliced prose",

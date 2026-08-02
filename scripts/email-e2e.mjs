@@ -204,8 +204,14 @@ async function main() {
     bindings[0]?.code ?? "none",
   );
   check(
+    // Per (player, tick), not per player: a binding is minted for every player
+    // on every beat, so a second tick resolving while this test runs — a
+    // deadline firing, another suite forcing one — legitimately produces more
+    // rows for the same player. Asserting one row per player made this fail
+    // for a reason that had nothing to do with the property being tested.
     "bindings are per-player, not shared",
-    new Set(bindings.map((b) => b.player_id)).size === bindings.length,
+    new Set(bindings.map((b) => `${b.player_id}@${b.tick}`)).size === bindings.length,
+    `${bindings.length} rows across ${new Set(bindings.map((b) => b.tick)).size} tick(s)`,
   );
   check(
     "bindings are addressed to the members of this campaign",
