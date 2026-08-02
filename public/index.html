@@ -183,7 +183,10 @@
           <button type="submit" class="primary">Submit turn</button>
         </form>
 
-        <details id="sheet-details">
+        <!-- Open by default: who you are is orientation, not an optional
+             extra, and a player should not have to go looking for it. The
+             genuinely optional sections below stay collapsed. -->
+        <details id="sheet-details" open>
           <summary>Your character</summary>
           <div id="sheet"></div>
         </details>
