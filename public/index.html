@@ -3,9 +3,109 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f6f3ec" />
     <title>asyncrpg</title>
+    <meta
+      name="description"
+      content="An asynchronous, play-by-email tabletop RPG with a simulated world and an LLM dungeon master."
+    />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <p>Booting…</p>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <a class="brand" href="/">asyncrpg</a>
+      <button id="signout" class="linkbtn" type="button" hidden>Sign out</button>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <!-- Signed out -->
+      <section id="view-signin" hidden>
+        <h1>A tabletop campaign that waits for you</h1>
+        <p class="lede">
+          Your group plays by email, at whatever pace suits. Miss a week and nothing bad happens —
+          no penalty, ever. The world keeps turning; you pick up where you left off.
+        </p>
+        <form id="signin-form" novalidate>
+          <label for="email">Your email</label>
+          <input
+            id="email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            inputmode="email"
+            required
+            placeholder="you@example.com"
+          />
+          <button type="submit" class="primary">Email me a sign-in link</button>
+        </form>
+        <p class="fine">No password. We send a link that works once.</p>
+      </section>
+
+      <!-- Signed in, campaign list -->
+      <section id="view-home" hidden>
+        <h1>Your campaigns</h1>
+        <ul id="campaign-list" class="list"></ul>
+        <details id="create-details">
+          <summary>Start a new campaign</summary>
+          <form id="create-form" novalidate>
+            <label for="c-name">Name</label>
+            <input id="c-name" name="name" type="text" required maxlength="80" placeholder="Ashfall" />
+            <label for="c-slug">Short link</label>
+            <input
+              id="c-slug"
+              name="slug"
+              type="text"
+              required
+              maxlength="31"
+              pattern="[a-z0-9][a-z0-9-]{1,30}"
+              placeholder="ashfall"
+            />
+            <label for="c-cadence">How often does the story advance?</label>
+            <select id="c-cadence" name="cadence">
+              <option value="weekly" selected>Weekly</option>
+              <option value="daily">Daily</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <button type="submit" class="primary">Create campaign</button>
+          </form>
+        </details>
+      </section>
+
+      <!-- A campaign -->
+      <section id="view-campaign" hidden>
+        <p class="crumb"><button id="back" class="linkbtn" type="button">&larr; All campaigns</button></p>
+        <h1 id="c-title"></h1>
+        <p id="c-where" class="lede"></p>
+
+        <div id="c-clock" class="clock"></div>
+
+        <form id="action-form" novalidate>
+          <label for="action" id="action-label">What do you do?</label>
+          <textarea
+            id="action"
+            name="text"
+            rows="4"
+            required
+            maxlength="4000"
+            placeholder="Write what your character does, in your own words."
+          ></textarea>
+          <button type="submit" class="primary">Submit turn</button>
+        </form>
+
+        <h2>The party</h2>
+        <ul id="c-cast" class="list"></ul>
+
+        <p><a id="c-chronicle" href="#" class="chronlink">Read the chronicle &rarr;</a></p>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
   </body>
 </html>

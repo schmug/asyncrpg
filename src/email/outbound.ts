@@ -1,0 +1,154 @@
+/**
+ * Outbound mail.
+ *
+ * Two rules govern everything here:
+ *   1. Every message carries a stable `Message-ID` we record, so the reply
+ *      binds back to (campaign, player, tick) with no work from the player.
+ *   2. Anything written by a player or a model is escaped before it reaches
+ *      the HTML part. Narrative prose is untrusted content by definition.
+ */
+
+import { shortCode } from "../auth";
+import type { Env } from "../env";
+import { buildSubject, INBOX_LOCAL } from "./parse";
+
+export function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
+}
+
+function paragraphs(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map((p) => `<p style="margin:0 0 1em">${escapeHtml(p).replace(/\n/g, "<br>")}</p>`)
+    .join("\n");
+}
+
+function messageId(domain: string): string {
+  const rand = crypto.randomUUID();
+  return `${rand}@${domain}`;
+}
+
+export interface BeatMail {
+  campaignId: string;
+  campaignSlug: string;
+  campaignName: string;
+  tick: number;
+  playerId: string;
+  toEmail: string;
+  headline: string;
+  prose: string;
+  prompt: string;
+  recap?: string[];
+  /** Set when the DM acted for this player last tick, so we can say so plainly. */
+  actedForYou?: string | null;
+}
+
+/**
+ * Send one player their beat, and record the binding that lets their reply
+ * resolve without them doing anything but hitting reply.
+ */
+export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string } | null> {
+  const domain = env.MAIL_DOMAIN;
+  const code = shortCode();
+  const id = messageId(domain);
+  const replyTo = `${INBOX_LOCAL}@${domain}`;
+  const subject = buildSubject(mail.campaignName, mail.tick, code, mail.headline);
+  const chronicle = `${env.PUBLIC_ORIGIN}/c/${encodeURIComponent(mail.campaignSlug)}`;
+
+  const recapText = mail.recap?.length
+    ? `\n\nWhile you were away:\n${mail.recap.map((r) => `  · ${r}`).join("\n")}`
+    : "";
+  const autoText = mail.actedForYou
+    ? `\n\n(You were away last turn, so we had your character ${mail.actedForYou}. Nothing was risked.)`
+    : "";
+
+  const text =
+    `${mail.prose}${recapText}${autoText}\n\n` +
+    `— ${mail.prompt}\n\n` +
+    `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n` +
+    `Chronicle: ${chronicle}\n`;
+
+  const html =
+    `<div style="font:16px/1.6 Georgia,serif;max-width:34em;margin:0 auto;color:#1c1a17">` +
+    paragraphs(mail.prose) +
+    (mail.recap?.length
+      ? `<p style="margin:1.5em 0 .4em;font-weight:600">While you were away</p><ul style="margin:0 0 1em;padding-left:1.2em">` +
+        mail.recap.map((r) => `<li>${escapeHtml(r)}</li>`).join("") +
+        `</ul>`
+      : "") +
+    (mail.actedForYou
+      ? `<p style="margin:1em 0;padding:.7em 1em;background:#f4f1ea;border-radius:6px;font-size:.92em">` +
+        `You were away last turn, so we had your character ${escapeHtml(mail.actedForYou)}. Nothing was risked.</p>`
+      : "") +
+    `<hr style="border:0;border-top:1px solid #ddd8cf;margin:1.6em 0">` +
+    `<p style="margin:0 0 .6em;font-weight:600">${escapeHtml(mail.prompt)}</p>` +
+    `<p style="margin:0 0 1em;color:#6b6459;font-size:.9em">` +
+    `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>` +
+    `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
+    `</div>`;
+
+  try {
+    await env.EMAIL.send({
+      to: mail.toEmail,
+      from: { email: `dm@${domain}`, name: mail.campaignName },
+      replyTo,
+      subject,
+      text,
+      html,
+      headers: { "Message-ID": `<${id}>` },
+    });
+  } catch {
+    // A delivery failure must not stop the tick. The beat is already stored and
+    // readable on the web; the next tick's mail will carry the player forward.
+    return null;
+  }
+
+  try {
+    await env.DB.prepare(
+      `INSERT INTO reply_bindings (code, message_id, campaign_id, player_id, tick, expires_at, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        code,
+        id,
+        mail.campaignId,
+        mail.playerId,
+        mail.tick,
+        // Generous: a player who replies to a three-week-old mail should still
+        // land, and the tick check happens separately.
+        Date.now() + 90 * 24 * 60 * 60 * 1000,
+        new Date().toISOString(),
+      )
+      .run();
+  } catch {
+    // Without a binding the reply still works via the campaign address plus
+    // sender match; it just loses the tick association.
+    return { code };
+  }
+  return { code };
+}
+
+export async function sendMagicLink(env: Env, toEmail: string, token: string): Promise<boolean> {
+  const url = `${env.PUBLIC_ORIGIN}/auth/callback?t=${encodeURIComponent(token)}`;
+  try {
+    await env.EMAIL.send({
+      to: toEmail,
+      from: { email: `dm@${env.MAIL_DOMAIN}`, name: "asyncrpg" },
+      subject: "Your sign-in link",
+      text: `Sign in:\n\n${url}\n\nThis link works once and expires in 20 minutes.\nIf you didn't ask for it, ignore this email.\n`,
+      html:
+        `<div style="font:16px/1.6 Georgia,serif;max-width:30em;margin:0 auto">` +
+        `<p><a href="${escapeHtml(url)}" style="color:#8a4b2a">Sign in to asyncrpg</a></p>` +
+        `<p style="color:#6b6459;font-size:.9em">This link works once and expires in 20 minutes. ` +
+        `If you didn't ask for it, ignore this email.</p></div>`,
+    });
+    return true;
+  } catch {
+    return false;
+  }
+}

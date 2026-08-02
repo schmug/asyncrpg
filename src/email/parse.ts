@@ -115,11 +115,22 @@ export function localPart(address: string | null | undefined): string | null {
   return local.length > 0 ? local : null;
 }
 
-/** Per-campaign inbound address local part: `rpg-<slug>`. */
-export const campaignLocalPart = (slug: string): string => `rpg-${slug}`;
+/**
+ * One shared inbound address for every campaign.
+ *
+ * Per-campaign addresses (`rpg-<slug>@`) would read better, but Cloudflare
+ * Email Routing matches rules on exact addresses, so each campaign would need
+ * a rule created at runtime — which means shipping a zone-scoped Cloudflare
+ * API token into the Worker. That is a large standing credential to hold for a
+ * cosmetic gain.
+ *
+ * One address needs one rule, provisioned once, and costs nothing: a reply is
+ * bound to its campaign by the threading header or subject code, and a fresh
+ * mail from a player in a single campaign is unambiguous anyway.
+ */
+export const INBOX_LOCAL = "rpg";
 
-export function slugFromLocalPart(local: string | null): string | null {
-  if (!local) return null;
-  const bare = local.split("+")[0] ?? local;
-  return bare.startsWith("rpg-") ? bare.slice(4) : null;
+export function isInboxAddress(local: string | null): boolean {
+  if (!local) return false;
+  return (local.split("+")[0] ?? local) === INBOX_LOCAL;
 }

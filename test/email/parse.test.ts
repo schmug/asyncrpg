@@ -1,12 +1,12 @@
 import { describe, expect, it } from "vitest";
 import {
   buildSubject,
-  campaignLocalPart,
   codeFromSubject,
+  INBOX_LOCAL,
+  isInboxAddress,
   localPart,
   referencedMessageIds,
   sameAddress,
-  slugFromLocalPart,
   stripQuotedReply,
 } from "../../src/email/parse";
 
@@ -165,23 +165,26 @@ describe("sameAddress", () => {
   });
 });
 
-describe("campaign inbox addressing", () => {
-  it("round-trips a slug through the local part", () => {
-    expect(slugFromLocalPart(campaignLocalPart("ashfall"))).toBe("ashfall");
+describe("inbox addressing", () => {
+  it("recognises the shared inbox", () => {
+    expect(isInboxAddress(INBOX_LOCAL)).toBe(true);
   });
 
   it("tolerates a plus tag added by a forwarding chain", () => {
-    expect(slugFromLocalPart("rpg-ashfall+spam")).toBe("ashfall");
+    expect(isInboxAddress("rpg+ashfall")).toBe(true);
   });
 
-  it("returns null for an unrelated address", () => {
-    expect(slugFromLocalPart("security")).toBeNull();
-    expect(slugFromLocalPart(null)).toBeNull();
+  it("rejects every other local part, including near-misses", () => {
+    expect(isInboxAddress("security")).toBe(false);
+    expect(isInboxAddress("rpgx")).toBe(false);
+    expect(isInboxAddress("rpg-ashfall")).toBe(false);
+    expect(isInboxAddress(null)).toBe(false);
+    expect(isInboxAddress("")).toBe(false);
   });
 
-  it("extracts the local part from a full address", () => {
-    expect(localPart("RPG-Ashfall@cortech.online")).toBe("rpg-ashfall");
-    expect(localPart("Ashfall <rpg-ashfall@cortech.online>")).toBe("rpg-ashfall");
+  it("extracts and lowercases the local part from a full address", () => {
+    expect(localPart("RPG@cortech.online")).toBe("rpg");
+    expect(localPart("Ashfall <rpg@cortech.online>")).toBe("rpg");
     expect(localPart("garbage")).toBeNull();
   });
 });

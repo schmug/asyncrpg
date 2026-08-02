@@ -20,6 +20,7 @@ import { narrateBeat } from "./dm/narrate";
 import { parseIntent } from "./dm/intent";
 import { promptFor } from "./dm/fallback";
 import type { Beat, BudgetGuard, DmConfig } from "./dm/narrate";
+import { sendBeat } from "./email/outbound";
 import type { Env } from "./env";
 import type { PlayerAction, WorldEvent, WorldState } from "./sim/types";
 
@@ -45,15 +46,23 @@ export interface JoinResult {
   prompt: string;
 }
 
-export interface TickOutcome {
+/**
+ * What a tick reports back over RPC.
+ *
+ * Deliberately small: the full event log and world state stay inside the
+ * object rather than crossing the RPC boundary on every tick. Declared as a
+ * type alias rather than an interface so it satisfies the serializability
+ * constraint on Durable Object return values.
+ */
+export type TickSummary = {
   tick: number;
-  beat: Beat;
-  events: WorldEvent[];
-  recaps: Record<string, string[]>;
+  /** "model" or "templated" — surfaced honestly, including to smoke tests. */
+  source: string;
+  eventCount: number;
   /** Player ids whose action was auto-chosen this tick. */
   drifted: string[];
   reason: "quorum" | "deadline" | "manual";
-}
+};
 
 export interface CampaignSnapshot {
   campaignId: string;
@@ -280,7 +289,7 @@ export class CampaignDO extends DurableObject<Env> {
 
   // ─── the tick ──────────────────────────────────────────────────────────
 
-  async resolveTick(reason: TickOutcome["reason"]): Promise<TickOutcome> {
+  async resolveTick(reason: TickSummary["reason"]): Promise<TickSummary> {
     const world = this.#world();
     const config = this.#config();
     const meta = this.#get<{ name: string; slug: string }>("meta") ?? { name: "Campaign", slug: "c" };
@@ -338,11 +347,19 @@ export class CampaignDO extends DurableObject<Env> {
     await this.#project(result.state, result.events, beat, meta);
     await this.#scheduleNextTick();
 
+    // A deadline tick has no HTTP caller, so the fan-out has to happen here.
+    // Detached: nobody should wait on N mail sends, and a bounce must not roll
+    // back a tick that already resolved.
+    this.ctx.waitUntil(
+      this.#fanOut(result.state, beat, result, meta).catch((err) => {
+        console.error("fan-out failed", err);
+      }),
+    );
+
     return {
       tick: result.state.tick,
-      beat,
-      events: result.events,
-      recaps: result.recaps,
+      source: beat.source,
+      eventCount: result.events.length,
       drifted: result.resolutions.filter((r) => r.action.auto).map((r) => r.action.playerId),
       reason,
     };
@@ -359,6 +376,49 @@ export class CampaignDO extends DurableObject<Env> {
         .run();
     } catch {
       /* the DO alarm is the real clock; D1 only mirrors it for display */
+    }
+  }
+
+  /** Mail every member their beat, their prompt, and any recap they are owed. */
+  async #fanOut(
+    state: WorldState,
+    beat: Beat,
+    result: { resolutions: { action: PlayerAction }[]; recaps: Record<string, string[]> },
+    meta: { name: string; slug: string },
+  ): Promise<void> {
+    const members = await this.env.DB.prepare(
+      `SELECT m.player_id, p.email FROM memberships m
+       JOIN players p ON p.id = m.player_id WHERE m.campaign_id = ?`,
+    )
+      .bind(state.campaignId)
+      .all<{ player_id: string; email: string }>();
+
+    // First line of the beat makes a serviceable subject; fall back to place.
+    const headline =
+      beat.prose.split("\n").find((l) => l.trim().length > 0)?.slice(0, 70) ??
+      `${state.season} of year ${state.year}`;
+
+    for (const member of members.results ?? []) {
+      const character = Object.values(state.characters).find((c) => c.playerId === member.player_id);
+      if (!character) continue;
+
+      const auto = result.resolutions.find(
+        (r) => r.action.characterId === character.id && r.action.auto,
+      );
+
+      await sendBeat(this.env, {
+        campaignId: state.campaignId,
+        campaignSlug: meta.slug,
+        campaignName: meta.name,
+        tick: state.tick,
+        playerId: member.player_id,
+        toEmail: member.email,
+        headline,
+        prose: beat.prose,
+        prompt: promptFor(character, state),
+        recap: result.recaps[character.id],
+        actedForYou: auto ? auto.action.intent : null,
+      });
     }
   }
 
