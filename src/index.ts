@@ -45,7 +45,17 @@ function harden(res: Response): Response {
   headers.set(
     "content-security-policy",
     "default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; " +
-      "script-src 'self'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      // The zone has Cloudflare Web Analytics auto-injection enabled, which
+      // rewrites a beacon script into every HTML response before it leaves the
+      // edge. Under a strict `script-src 'self'` the browser blocks it on every
+      // page load, which permanently reddens the console-error gate and makes
+      // it useless for catching real errors. Allowing this one Cloudflare-owned
+      // host is the narrowest fix available from inside the app; the tighter
+      // option is turning auto-injection off at the zone, which is the domain
+      // owner's call and not something to change unilaterally.
+      "script-src 'self' https://static.cloudflareinsights.com; " +
+      "connect-src 'self' https://cloudflareinsights.com; " +
+      "form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
   );
   headers.set("strict-transport-security", "max-age=31536000; includeSubDomains");
   return new Response(res.body, { status: res.status, statusText: res.statusText, headers });
@@ -143,7 +153,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const session: Session | null = await sessionFrom(env, request);
 
   if (path === "/api/me") {
-    if (!session) return fail(401, "not signed in");
+    // "Who am I?" answered for an anonymous visitor is `nobody`, not an error.
+    // Returning 401 here made the browser log a console error on every
+    // signed-out page load, which is noise that hides real failures. It leaks
+    // nothing: an anonymous caller already knows they are anonymous.
+    if (!session) return json({ player: null, campaigns: [] });
     const campaigns = await env.DB.prepare(
       `SELECT c.slug, c.name, c.tick, c.deadline_at, m.character_name
        FROM memberships m JOIN campaigns c ON c.id = m.campaign_id

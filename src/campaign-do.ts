@@ -238,7 +238,11 @@ export class CampaignDO extends DurableObject<Env> {
     rawText: string,
     via: "email" | "web",
   ): Promise<{ accepted: boolean; resolvedNow: boolean; reason?: string }> {
-    const world = this.#world();
+    // Inbound email submits detached via `waitUntil`, so a throw here surfaces
+    // as an unhandled rejection rather than a message the sender can act on.
+    // A binding that outlives its campaign is a normal thing to encounter.
+    const world = this.#get<WorldState>("world");
+    if (!world) return { accepted: false, resolvedNow: false, reason: "campaign not initialised" };
     const character = Object.values(world.characters).find((c) => c.playerId === playerId);
     if (!character) return { accepted: false, resolvedNow: false, reason: "not a member" };
 

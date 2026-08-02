@@ -121,8 +121,12 @@ async function main() {
   check("CSP does not allow inline script", !/script-src[^;]*unsafe-inline/.test(csp));
   check("nosniff is set", health.headers.get("x-content-type-options") === "nosniff");
 
-  const me401 = await req("/api/me");
-  check("/api/me requires a session", me401.status === 401);
+  const meAnon = await req("/api/me");
+  check(
+    "/api/me answers anonymously without erroring",
+    meAnon.status === 200 && meAnon.json?.player === null,
+    `status ${meAnon.status}`,
+  );
 
   const unknown = await req("/api/nope");
   check("unknown API path 404s as JSON", unknown.status === 404 && unknown.json?.error);

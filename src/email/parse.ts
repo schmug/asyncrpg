@@ -58,10 +58,18 @@ const CUTOFFS: RegExp[] = [
 /**
  * Strip quoted history, signatures, and client boilerplate from a reply.
  *
- * Deliberately conservative in one direction: if stripping would leave nothing,
- * we return the original text rather than an empty action. A player who
- * bottom-posts inside the quote should still get a turn, even if what we
- * capture is messy — silence is the worse failure.
+ * Two failure modes, and they pull in opposite directions:
+ *
+ * A player who bottom-posts *inside* the quote has written something, and
+ * dropping it because the cutoff came first would silently eat their turn. So
+ * when the simple pass finds nothing, we salvage every non-quote line from
+ * anywhere in the message.
+ *
+ * But when there genuinely is nothing — a reply that is only a signature, an
+ * out-of-office, or a bare quote of the DM's own prose — returning the
+ * original text would submit "Sent from my iPhone" as that player's action.
+ * That is worse than returning nothing: an empty result gets a clear "that
+ * reply had no action in it" bounce, which the player can act on.
  */
 export function stripQuotedReply(raw: string): string {
   const normalized = raw.replace(/\r\n/g, "\n");
@@ -78,13 +86,13 @@ export function stripQuotedReply(raw: string): string {
   const cleaned = kept.join("\n").trim();
   if (cleaned.length > 0) return cleaned;
 
-  // Everything was quote or signature. Recover whatever unquoted prose exists
-  // anywhere in the message rather than returning nothing.
+  // Everything before the first cutoff was empty. Recover any unquoted,
+  // non-boilerplate prose from further down the message.
   const salvage = lines
     .filter((l) => !/^\s*>/.test(l) && !CUTOFFS.some((re) => re.test(l)))
     .join("\n")
     .trim();
-  return salvage.length > 0 ? salvage : normalized.trim();
+  return salvage;
 }
 
 /** Address comparison that ignores case and any `+tag` on the local part. */

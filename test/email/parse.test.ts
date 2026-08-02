@@ -122,9 +122,18 @@ describe("stripQuotedReply", () => {
     expect(out).toContain("I let him wait.");
   });
 
-  it("returns the original text rather than nothing when everything looks quoted", () => {
-    const raw = "> only quoted content here\n> and more of it";
-    expect(stripQuotedReply(raw).length).toBeGreaterThan(0);
+  it("returns nothing when the player wrote nothing of their own", () => {
+    // Returning the quoted text here would submit the DM's own prose as the
+    // player's action. An empty result gets a clear bounce instead.
+    expect(stripQuotedReply("> only quoted content here\n> and more of it")).toBe("");
+  });
+
+  it("returns nothing for a reply that is only a signature", () => {
+    expect(stripQuotedReply("\r\n\r\n-- \r\nSent from my iPhone")).toBe("");
+  });
+
+  it("returns nothing for a bare out-of-office style boilerplate reply", () => {
+    expect(stripQuotedReply("Sent from my iPhone")).toBe("");
   });
 
   it("handles an empty body without throwing", () => {

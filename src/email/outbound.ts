@@ -92,19 +92,39 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
     `</div>`;
 
+  let assignedMessageId: string | null = null;
   try {
-    await env.EMAIL.send({
+    // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
+    // ("Only whitelisted headers and X-* headers are accepted"), so the
+    // threading id cannot be chosen by us — it is assigned at send time and
+    // read back off the response. The `X-Asyncrpg-*` headers below are for
+    // operators reading raw mail; replies never echo them, so they play no
+    // part in binding.
+    const sent = (await env.EMAIL.send({
       to: mail.toEmail,
       from: { email: `dm@${domain}`, name: mail.campaignName },
       replyTo,
       subject,
       text,
       html,
-      headers: { "Message-ID": `<${id}>` },
-    });
-  } catch {
-    // A delivery failure must not stop the tick. The beat is already stored and
-    // readable on the web; the next tick's mail will carry the player forward.
+      headers: {
+        "X-Asyncrpg-Campaign": mail.campaignSlug,
+        "X-Asyncrpg-Tick": String(mail.tick),
+      },
+    })) as { messageId?: string; message_id?: string; id?: string } | undefined;
+
+    const raw = sent?.messageId ?? sent?.message_id ?? sent?.id ?? null;
+    assignedMessageId = raw ? raw.replace(/^<|>$/g, "") : null;
+  } catch (err) {
+    // A delivery failure must not stop the tick — the beat is already stored
+    // and readable on the web, and the next tick's mail carries the player
+    // forward. But it must not be *silent*: swallowing this without a log
+    // makes a total mail outage invisible, which is the one failure mode that
+    // breaks the product's primary channel while every dashboard stays green.
+    console.error(
+      `email send failed campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
+      err instanceof Error ? err.message : String(err),
+    );
     return null;
   }
 
@@ -115,7 +135,11 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     )
       .bind(
         code,
-        id,
+        // When the provider does not hand back a threading id, store a value
+        // that is unique but can never match an inbound In-Reply-To. The
+        // subject code then carries the binding on its own — degraded, not
+        // broken, and honest about which path is live.
+        assignedMessageId ?? `unthreaded:${id}`,
         mail.campaignId,
         mail.playerId,
         mail.tick,
@@ -125,9 +149,14 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
         new Date().toISOString(),
       )
       .run();
-  } catch {
-    // Without a binding the reply still works via the campaign address plus
-    // sender match; it just loses the tick association.
+  } catch (err) {
+    // Without a binding the reply still works via sender match alone; it just
+    // loses the tick association. Log it: a binding table that is silently
+    // never written looks identical to one that is working.
+    console.error(
+      `reply binding insert failed campaign=${mail.campaignId} tick=${mail.tick}:`,
+      err instanceof Error ? err.message : String(err),
+    );
     return { code };
   }
   return { code };

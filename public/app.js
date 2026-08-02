@@ -219,6 +219,7 @@ $("back").addEventListener("click", () => {
 async function load() {
   try {
     const me = await api("/api/me");
+    if (!me.player) throw new Error("signed out");
     $("signout").hidden = false;
     const match = /^#\/c\/([a-z0-9-]{2,31})$/.exec(location.hash);
     if (match) {
