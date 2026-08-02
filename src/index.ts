@@ -478,8 +478,17 @@ export default {
     try {
       return harden(await route(request, env, ctx));
     } catch (err) {
-      console.error("unhandled", err);
-      return harden(fail(500, "something went wrong"));
+      // A generic 500 is untraceable: a smoke run records "status 500" and the
+      // log line that explains it cannot be tied to that request. Cycle 4's
+      // capture caught exactly one such failure, unreproducible afterwards and
+      // therefore undiagnosable. The id is echoed to the caller and logged with
+      // the error, so any recurrence names its own log line.
+      const id = crypto.randomUUID().slice(0, 8);
+      console.error(
+        `unhandled [${id}] ${request.method} ${new URL(request.url).pathname}:`,
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return harden(fail(500, `something went wrong (ref ${id})`));
     }
   },
 

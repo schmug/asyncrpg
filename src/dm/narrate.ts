@@ -150,24 +150,43 @@ function factSheet(
 }
 
 /**
- * Strip markup the model wrapped around its prose but did not mean as prose.
+ * Strip the markup a model wraps around prose but does not mean as prose.
  *
- * Production shipped four beats ending in a bare ``` — the model closing a
- * fence it had opened outside the JSON string, which every later stage happily
- * carried into canon and onto the public chronicle. Fences are never legitimate
- * here: this field is narrative prose, and no beat has any reason to contain a
- * code block. Stripping is right rather than rejecting, because the prose
- * around the stray fence is otherwise sound — throwing the beat away would
- * replace good writing with templated text over a stray backtick.
+ * Two classes have reached production canon and the public chronicle:
+ *
+ *   - a bare ``` closing a fence the model opened outside the JSON string;
+ *   - a literal `//n` or `\n` where it meant a line break, written as text
+ *     because it was already inside a JSON string and escaped it wrongly.
+ *
+ * Neither is ever legitimate in narrative prose, so both are safe to rewrite.
+ * Stripping beats rejecting: the writing around the artifact is sound, and
+ * discarding a good beat over three backticks trades it for templated text.
+ *
+ * Exported for testing — this is the last gate before prose becomes canon.
  */
-function stripFences(text: string): string {
-  return text
-    // A fence line, opened or closed, with or without a language tag.
-    .replace(/^[ \t]*`{3,}[a-z]*[ \t]*$/gim, "")
-    // A fence run left inline, most often jammed onto the final sentence.
-    .replace(/`{3,}/g, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
+export function normalizeProse(text: string): string {
+  return (
+    text
+      // A fence line, opened or closed, with or without a language tag.
+      .replace(/^[ \t]*`{3,}[a-z]*[ \t]*$/gim, "")
+      // A fence run left inline, most often jammed onto the final sentence.
+      .replace(/`{3,}/g, "")
+      // Escape sequences that arrived as literal characters. `//n` is the shape
+      // seen in production; `\n` and `\\n` are the same mistake spelled the
+      // usual ways.
+      //
+      // The lookahead is lowercase-only, and deliberately so: it must not eat
+      // "and/nor" or "north/northeast", but it must still catch the common
+      // inter-paragraph case where a capital follows ("...week.//nThe next
+      // morning"). A following lowercase letter means it is a real word, so
+      // leave it alone — declining the ambiguous case is the safe direction.
+      .replace(/(?:\/\/|\\{1,2})n(?![a-z])/g, "\n")
+      .replace(/(?:\/\/|\\{1,2})t(?![a-z])/g, " ")
+      .replace(/[ \t]{2,}/g, " ")
+      .replace(/[ \t]+\n/g, "\n")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim()
+  );
 }
 
 /**
@@ -254,8 +273,8 @@ export async function narrateBeat(
     // Normalize before validating, so `usable` judges the prose that will
     // actually be stored rather than the prose plus its wrapper.
     const parsed = {
-      prose: typeof raw.prose === "string" ? stripFences(raw.prose) : raw.prose,
-      situation: typeof raw.situation === "string" ? stripFences(raw.situation) : raw.situation,
+      prose: typeof raw.prose === "string" ? normalizeProse(raw.prose) : raw.prose,
+      situation: typeof raw.situation === "string" ? normalizeProse(raw.situation) : raw.situation,
     };
     if (!usable(parsed.prose, parsed.situation)) {
       return { ...fallback, source: "templated", degradedReason: "model output failed validation" };

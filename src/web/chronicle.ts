@@ -7,6 +7,7 @@
  */
 
 import { renownLabel } from "../sim/character";
+import { normalizeProse } from "../dm/narrate";
 import { escapeHtml } from "../email/outbound";
 import type { Env } from "../env";
 
@@ -294,7 +295,11 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
                     ? `<span class="tag">recorded without narration</span>`
                     : "") +
                   `</p>` +
-                  b.prose
+                  // Normalized on the way out as well as on the way in: beats
+                  // stored before a given artifact was recognized are already
+                  // canon, and re-rendering them clean is cheaper and safer
+                  // than rewriting history in the database.
+                  normalizeProse(b.prose)
                     .split(/\n{2,}/)
                     .map((p) => `<p>${escapeHtml(p)}</p>`)
                     .join("") +

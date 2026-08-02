@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { templatedBeat } from "../../src/dm/fallback";
 import { parseIntentKeywords, resolveTarget } from "../../src/dm/intent";
-import { narrateBeat, UNLIMITED_BUDGET } from "../../src/dm/narrate";
+import { narrateBeat, normalizeProse, UNLIMITED_BUDGET } from "../../src/dm/narrate";
 import type { DmConfig } from "../../src/dm/narrate";
 import { joinCharacter } from "../../src/sim/character";
 import { generateWorld } from "../../src/sim/genesis";
@@ -420,6 +420,32 @@ describe("narrateBeat degradation", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it("rewrites escape sequences the model wrote as literal text", () => {
+    // Observed on the public chronicle: the model meant a line break, was
+    // already inside a JSON string, and escaped it wrongly.
+    expect(normalizeProse("gets repeated at supper tables for a week.//n")).toBe(
+      "gets repeated at supper tables for a week.",
+    );
+    expect(normalizeProse("He turned away.//nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+    expect(normalizeProse("He turned away.\\nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+    expect(normalizeProse("He turned away.\\\\nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+  });
+
+  it("leaves ordinary prose containing slashes and words alone", () => {
+    // The guard must not eat real writing. "n" starting a word after a slash
+    // is the dangerous case: "and/nor", a path, a fraction.
+    const fine =
+      "The tithe was 2/3 of the harvest, and/nor did anyone argue. " +
+      "He kept a note in his ledger marked north/northeast.";
+    expect(normalizeProse(fine)).toBe(fine);
   });
 
   it("does not mistake ordinary prose for corruption", async () => {
