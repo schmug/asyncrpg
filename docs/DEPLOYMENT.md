@@ -42,20 +42,23 @@ These are deviations between what the app asks for and what the edge serves.
 `scripts/smoke.mjs` gates them: a **known** deviation passes with a loud note,
 an **undocumented** one fails the suite.
 
-### 1. HSTS is disabled at the zone
+### 1. HSTS — enabled at the zone, shorter than the app asks for
 
-- The app sends `strict-transport-security: max-age=31536000; includeSubDomains`.
-- Production serves `max-age=0; includeSubDomains; preload` — the zone rewrites
-  the max-age to zero and appends its own directives. The smoke gate matches on
-  `max-age=0` rather than the whole string, because the tail Cloudflare emits
-  has already changed once; a zero max-age is the substantive deviation.
-- The `cortech.online` zone has HSTS off, and the zone setting wins.
-- **To fix:** Cloudflare dashboard → SSL/TLS → Edge Certificates → HTTP Strict
-  Transport Security → enable, max-age 12 months, include subdomains.
-- **Why it is not done here:** enabling HSTS on an apex with `includeSubDomains`
-  commits *every* subdomain of `cortech.online` to HTTPS-only for the max-age
-  window, and it cannot be quickly undone — browsers cache the policy. That is
-  a decision about the owner's whole domain, not about this app.
+**Resolved 2026-08-02.** The owner enabled HSTS. Production now serves
+`max-age=2592000; includeSubDomains; preload` (30 days).
+
+The app's own header asks for `max-age=31536000` (one year), and the zone
+setting wins — so the two still differ on paper. That is fine and deliberate:
+30 days with `includeSubDomains` is the cautious ramp, because HSTS cannot be
+withdrawn quickly once browsers have cached it.
+
+The smoke suite therefore asserts the **property**, not the string: HSTS must
+be present with `max-age` of at least 30 days and must cover subdomains. A
+zero max-age is a hard failure. It used to pass as "known documented drift",
+which is exactly how a disabled security header survives three review cycles.
+
+If the zone is later raised to a full year, nothing needs to change here — the
+gate already accepts it, and `preload` submission requires it.
 
 ### 2. Cloudflare Web Analytics auto-injection
 

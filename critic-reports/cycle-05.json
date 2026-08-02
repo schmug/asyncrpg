@@ -1,0 +1,40 @@
+{
+  "scores": {
+    "product": 8,
+    "async": 8,
+    "narrative": 7,
+    "ux": 7,
+    "rigor": 7
+  },
+  "verdict": "fail",
+  "summary": "asyncrpg is not vaporware: the deterministic simulation, quorum/deadline tick loop, mobile flow, email loop, and absence mechanics are implemented and tested. The no-penalty absence model is mostly honored in code, including long absences and return recaps. It is not yet professionally shippable because the live chronicle contains visibly corrupted model prose, the email-first UX lacks Gmail/Outlook deliverability proof, and the verification harness accepts production edge-security drift as passing.",
+  "requiredFixes": [
+    {
+      "severity": "major",
+      "category": "narrative",
+      "title": "Reject corrupted model prose",
+      "detail": "The live capture ships visible narration corruption such as `does.MjM Kestrel...` in `live-capture/generated-narration.txt:58` and the rendered chronicle in `live-capture/chronicle-demo.html.txt:70`. The validators in `src/dm/narrate.ts:167-218` and render-time normalization in `src/web/chronicle.ts:298-305` do not catch it. Done means adding a regression fixture for this artifact class, rejecting or cleaning malformed prose before persistence/render, repairing affected beats, and making smoke/critic checks fail on visible junk tokens."
+    },
+    {
+      "severity": "major",
+      "category": "ux",
+      "title": "Prove real inbox deliverability",
+      "detail": "`live-capture/email-e2e-output.txt:33-34` explicitly says Gmail/Outlook deliverability and spam placement are not covered. For a play-by-email product, Cloudflare routing success is not enough to prove a non-technical group can reliably sign in, receive prompts, and reply from their actual inboxes. Done means seed-list deliverability checks for major providers, visible delivery-failure handling, and a backup onboarding/recovery path when mail does not arrive."
+    },
+    {
+      "severity": "major",
+      "category": "rigor",
+      "title": "Stop accepting edge-security drift",
+      "detail": "The app code intends strong HSTS in `src/index.ts:44-60`, but live capture shows `strict-transport-security: max-age=0` and the smoke output treats that as a known passing drift in `live-capture/smoke-output.txt:8`. The captured chronicle also includes injected inline Cloudflare script markup despite the intended CSP posture. Done means production headers match the security policy, unwanted edge injection is disabled or explicitly modeled, and the gate fails when deployed headers are weaker than intended."
+    },
+    {
+      "severity": "minor",
+      "category": "async",
+      "title": "Make halted tick semantics honest",
+      "detail": "The product promise reads like ticks always resolve, but `src/campaign-do.ts:117-125` and `src/campaign-do.ts:453-610` can halt a campaign after repeated invariant-blocked ticks. That is a reasonable safety valve, not a silent wedge, but the claim should be precise. Done means documenting and testing the visible halt/resume behavior as the supported failure mode, or adding a repair path that preserves the stronger always-resolves claim."
+    }
+  ],
+  "cycle": 5,
+  "revision": "c2bdb062f0d93934ab1320935aee96912dccd759",
+  "capturedAt": "2026-08-02T19:46:12.324Z"
+}

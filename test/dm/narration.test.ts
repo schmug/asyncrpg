@@ -1,7 +1,7 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { templatedBeat } from "../../src/dm/fallback";
 import { parseIntentKeywords, resolveTarget } from "../../src/dm/intent";
-import { narrateBeat, normalizeProse, UNLIMITED_BUDGET } from "../../src/dm/narrate";
+import { looksCorrupted, narrateBeat, normalizeProse, UNLIMITED_BUDGET } from "../../src/dm/narrate";
 import type { DmConfig } from "../../src/dm/narrate";
 import { joinCharacter } from "../../src/sim/character";
 import { generateWorld } from "../../src/sim/genesis";
@@ -420,6 +420,25 @@ describe("narrateBeat degradation", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it.each([
+    ["digits", "It was over before he'd finished.732 and the room went quiet again."],
+    ["a lowercase splice", "The light went out of the evening.ot. of it.was about to boil over."],
+    ["a base64-looking token", "she knows the moment it does.MjM Kestrel Vane, elsewhere, kept on."],
+  ])("treats a splice against terminal punctuation as corruption — %s", (_label, sample) => {
+    // Every corruption this product has shipped has had this one shape. The
+    // three samples are verbatim from three different production captures.
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    ["a decimal", "The tithe came to 1.5 measures of grain, and no more than that."],
+    ["an ellipsis", "Bram counted it twice... then counted it a third time to be sure."],
+    ["an initialism", "He had it from a man who swore he'd seen it, e.g. the drover."],
+    ["ordinary sentences", "It rained. Then it stopped. Nobody said anything for a while."],
+  ])("does not fire on legitimate prose — %s", (_label, sample) => {
+    expect(looksCorrupted(sample)).toBe(false);
   });
 
   it("rewrites escape sequences the model wrote as literal text", () => {

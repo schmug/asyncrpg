@@ -107,7 +107,8 @@ first. An eager group moves fast; a slow group still moves.
   dormant players counted toward quorum, a half-dormant group could never reach
   it and would always wait out the full deadline.
 - Cadence options: `daily`, `weekly`, `monthly`. Changeable mid-campaign.
-- A tick **always resolves.** See §8.
+- A tick **always resolves, or the campaign visibly halts and can be resumed.**
+  It never silently stops moving. See §8.
 
 ## 5. Absence — the no-penalty promise
 
@@ -275,14 +276,32 @@ character histories, world map summary. This is the shareable artifact.
 
 ## 8. Failure posture
 
-**The tick always resolves.** There is no state in which a campaign wedges.
+**The tick always resolves, or the campaign says out loud that it cannot.**
+There is no state in which a campaign silently wedges — which is the claim that
+actually matters, and is weaker than the one this section used to make.
 
 | Failure | Behavior |
 |---|---|
-| LLM emits invalid delta | retry once with the validation error appended; then fall back to templated prose generated directly from sim events |
+| LLM output unusable (spliced, truncated, fenced) | fall back to templated prose generated directly from sim events; tick still advances |
 | LLM unreachable / budget exceeded | same templated fallback; tick still advances |
-| Email send fails | retried; the beat remains readable on the web |
+| Email send fails | retried, then recorded in `delivery_failures` and shown to the player it was owed to; the beat remains readable on the web |
+| Inline resolve fails after an action is accepted | the action is already stored; the alarm resolves the tick instead. Late, not lost |
 | DO alarm fails | platform retries alarms |
+| A tick would violate a world invariant | rolled back whole, a "blocked" beat is written, pending actions cleared, and the tick retried on the next alarm |
+| **The same tick fails its invariants 3 times running** | **the campaign halts and stops scheduling** |
+
+That last row is the honest exception. Clearing the pending queue changes the
+inputs, so a violation caused by a player's action is genuinely fixed by
+retrying. One caused by deterministic world drift is not: the same state
+produces the same drift and the same rejection on every alarm, forever. A
+campaign that looks alive and never moves is worse than one that admits it has
+stopped, so after `BLOCKED_TICK_LIMIT` consecutive rejections it halts, reports
+the violations in its snapshot, and offers the host `resume()`.
+
+The policy is a pure function (`blockedTickPolicy`) with tests in
+`test/integration/blocked-ticks.test.ts`, including that no path through it
+reschedules indefinitely — "does not loop forever" is otherwise only observable
+by waiting forever.
 
 Cost control: per-campaign monthly token budget plus a global kill switch, both
 in D1. Exceeding either degrades narration quality — it never blocks play.

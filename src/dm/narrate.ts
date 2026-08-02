@@ -190,29 +190,46 @@ export function normalizeProse(text: string): string {
 }
 
 /**
+ * The one shape every corruption this product has shipped shares.
+ *
+ * Three separate artifact classes reached the public chronicle, each found by
+ * a different critic cycle, each patched individually:
+ *
+ *     ...he'd finished.732               (digits)
+ *     ...evening.ot. of it.was about     (lowercase splice)
+ *     ...the moment it does.MjM Kestrel  (a base64-looking token)
+ *
+ * Patching them one at a time was losing a cycle per class. They are all the
+ * same defect: something jammed against terminal punctuation with no space
+ * after it, which is what truncated or spliced structured output looks like.
+ * Real prose always puts a space after a sentence ends.
+ *
+ * The `[a-z]{2}` prefix is what keeps this from firing on the legitimate
+ * cases — decimals ("1.5") have a digit on the left, ellipses have a dot on
+ * the right, and initialisms ("e.g.", "U.S.") have a single letter or a
+ * capital before the point.
+ */
+const SPLICE = /[a-z]{2}[.!?][A-Za-z0-9]/;
+
+/** Exported so the smoke suite can hold the *live* chronicle to the same bar. */
+export function looksCorrupted(text: string): boolean {
+  return SPLICE.test(text) || /`{3,}/.test(text) || /(?:\/\/|\\{1,2})[nt](?![a-z])/.test(text);
+}
+
+/**
  * Reject prose that is empty, absurdly long, or visibly mangled.
  *
- * The mangling check is a backstop behind the `stop_reason` guard: truncated
- * structured output shows up as sentences fused without a space after
- * terminal punctuation ("evening.ot. of it.was about to"), which is not
- * something normal prose does. Cheap to check, and a garbled beat is worse
- * than a plain templated one.
+ * Unlike a stray fence — cosmetic, and stripped — a splice means the output
+ * was truncated or spliced mid-generation, so the *content* is unreliable and
+ * the beat is not salvageable. A plain templated beat is better than a
+ * confident one with a hole in it.
  */
 function usable(prose: unknown, situation: unknown): prose is string {
   if (typeof prose !== "string" || typeof situation !== "string") return false;
   const text = prose.trim();
   if (text.length < 40 || text.length > 8000) return false;
   if (situation.trim().length === 0) return false;
-
-  // Truncation artifacts: a letter or digit jammed against the end of a word
-  // with no space after terminal punctuation. Production produced both
-  // "evening.ot. of it.was" (letters) and "he'd finished.732" (digits), so
-  // both shapes are caught. A single occurrence is enough for the digit form,
-  // which has no legitimate reading here; decimals are excluded because they
-  // need a digit on the *left* of the point too.
-  if (/[a-z]{2}[.!?]\d/.test(text)) return false;
-  const fused = text.match(/[a-z]{2}[.!?][a-z]{2}/g);
-  if (fused && fused.length >= 2) return false;
+  if (SPLICE.test(text)) return false;
 
   return true;
 }

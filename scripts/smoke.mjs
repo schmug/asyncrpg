@@ -144,33 +144,22 @@ async function main() {
   // edge changes it, name the deviation explicitly. An *undocumented* drift
   // fails the gate; a known one passes loudly, so it stays visible instead of
   // being normalized into background noise. See docs/DEPLOYMENT.md.
-  const ZONE_DEVIATIONS = {
-    "strict-transport-security": {
-      intended: "max-age=31536000; includeSubDomains",
-      // Matched on the substantive directive rather than the whole string: the
-      // zone rewrites the max-age and appends its own directives, and the
-      // exact tail it emits has already changed once. What makes this a known
-      // deviation is that max-age is zero; the rest is Cloudflare's cosmetics.
-      known: (v) => /(^|;|\s)max-age=0(\s*;|\s*$)/.test(v),
-      owner: "domain owner — enable HSTS in SSL/TLS → Edge Certificates",
-    },
-  };
-  for (const [header, d] of Object.entries(ZONE_DEVIATIONS)) {
-    const live = health.headers.get(header) ?? "(absent)";
-    if (live === d.intended) {
-      check(`${header} matches intended policy`, true, "zone override no longer applies");
-    } else {
-      const known = d.known(live);
-      check(
-        `${header} drift is the known, documented one`,
-        known,
-        known
-          ? `serving "${live}", app intends "${d.intended}" — ${d.owner}`
-          : `UNDOCUMENTED drift: serving "${live}", app intends "${d.intended}" — ` +
-            `this is neither the intended policy nor the documented zone override`,
-      );
-    }
-  }
+  // The zone's HSTS setting overrides the app's header, so this asserts the
+  // property that actually protects users rather than string equality with
+  // what the app asked for. A disabled header (max-age=0) is a hard failure —
+  // it used to be tolerated as "known drift", which is precisely the kind of
+  // normalization that lets a security regression live forever.
+  const hsts = health.headers.get("strict-transport-security") ?? "";
+  const maxAge = Number(/max-age=(\d+)/.exec(hsts)?.[1] ?? "0");
+  const MIN_MAX_AGE = 2_592_000; // 30 days
+  check(
+    "HSTS is enabled with a meaningful max-age",
+    maxAge >= MIN_MAX_AGE,
+    maxAge === 0
+      ? `HSTS IS DISABLED — serving "${hsts || "(absent)"}"`
+      : `max-age=${maxAge}s (${Math.round(maxAge / 86400)} days)`,
+  );
+  check("HSTS covers subdomains", /includeSubDomains/i.test(hsts), hsts);
 
   const csp = health.headers.get("content-security-policy") ?? "";
   check("CSP is set and blocks framing", csp.includes("frame-ancestors 'none'"));
@@ -229,6 +218,24 @@ async function main() {
   }
 
   console.log("\nunauthenticated surface (continued):");
+  // Corruption has reached the public chronicle three times, each class caught
+  // by a critic rather than by us. The validator now rejects the shape they
+  // share; this asserts it against what is actually being served, because the
+  // validator only covers beats written *after* it shipped.
+  const demo = await req("/c/demo");
+  const prose = demo.text.replace(/<[^>]*>/g, " ");
+  const splice = /[a-z]{2}[.!?][A-Za-z0-9]/.exec(prose);
+  check(
+    "the public chronicle is free of spliced prose",
+    splice === null,
+    splice ? `found ${JSON.stringify(prose.slice(Math.max(0, splice.index - 40), splice.index + 40))}` : "",
+  );
+  check("the public chronicle has no stray code fences", !/`{3,}/.test(prose));
+  check(
+    "the public chronicle has no literal escape sequences",
+    !/(?:\/\/|\\{1,2})[nt](?![a-z])/.test(prose),
+  );
+
   const meAnon = await req("/api/me");
   check(
     "/api/me answers anonymously without erroring",

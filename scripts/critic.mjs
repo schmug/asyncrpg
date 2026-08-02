@@ -41,6 +41,10 @@ const EVIDENCE = [
   { cmd: "node", args: ["scripts/dump-narration.mjs", BASE, DEMO_SLUG], file: "generated-narration.txt" },
 ];
 const COPY_DIRS = ["critic-reports/ui"];
+// Manual evidence that cannot be produced by a script — the last mail hop into
+// a third-party inbox. Carried into the bundle so the critic reads the recorded
+// result rather than assuming the check was never made.
+const COPY_FILES = [["docs/deliverability.md", "deliverability.md"]];
 const CRITIC = { cmd: "codex", args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only"] };
 // ─────────────────────────────────────────────────────────────────────────
 
@@ -149,6 +153,13 @@ for (const step of EVIDENCE) {
 for (const dir of COPY_DIRS) {
   try {
     cpSync(dir, join(cap, dir.split("/").pop()), { recursive: true });
+  } catch {
+    /* optional */
+  }
+}
+for (const [src, dest] of COPY_FILES) {
+  try {
+    cpSync(src, join(cap, dest));
   } catch {
     /* optional */
   }
