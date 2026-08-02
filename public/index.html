@@ -198,6 +198,30 @@
           </p>
           <label for="invite-url" id="invite-url-label" hidden>Invite link</label>
           <input id="invite-url" type="text" readonly hidden />
+
+          <details id="pace-details">
+            <summary>Change the pace</summary>
+            <p class="fine">
+              Groups find their real pace by playing. Changing it takes effect from the current
+              turn — nothing already submitted is lost.
+            </p>
+            <form id="pace-form" novalidate>
+              <label for="pace-cadence">How often a turn resolves</label>
+              <select id="pace-cadence" name="cadence">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+              <label for="pace-quorum">How much of the party has to act first</label>
+              <select id="pace-quorum" name="quorumFraction">
+                <option value="0.34">About a third</option>
+                <option value="0.5">Half</option>
+                <option value="0.75">Three quarters</option>
+                <option value="1">Everyone</option>
+              </select>
+              <button type="submit" class="primary">Save the pace</button>
+            </form>
+          </details>
         </div>
 
         <h2>Between turns</h2>

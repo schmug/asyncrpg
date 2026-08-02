@@ -441,6 +441,24 @@ describe("narrateBeat degradation", () => {
     expect(looksCorrupted(sample)).toBe(false);
   });
 
+  it("strips the model's own editorial aside out of prose", () => {
+    // Verbatim from production: the model corrected itself in comment syntax
+    // and the note rode all the way to the public chronicle.
+    const sample =
+      "Kestrel walked away with more than they came for.// wait, remove that fragment.";
+    expect(normalizeProse(sample)).toBe("Kestrel walked away with more than they came for.");
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    "As an AI I cannot continue this scene.",
+    "Let me rewrite that opening line.",
+    "[note: check the faction name here]",
+    "Ignore the previous paragraph.",
+  ])("treats breaking frame as corruption — %s", (sample) => {
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
   it("rewrites escape sequences the model wrote as literal text", () => {
     // Observed on the public chronicle: the model meant a line break, was
     // already inside a JSON string, and escaped it wrongly.

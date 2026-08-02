@@ -237,17 +237,31 @@ async function main() {
     prose.length > 500,
     `${prose.length} chars of prose extracted`,
   );
-  const splice = /[a-z]{2}[.!?][A-Za-z0-9]/.exec(prose);
-  check(
-    "the public chronicle is free of spliced prose",
-    splice === null,
-    splice ? `found ${JSON.stringify(prose.slice(Math.max(0, splice.index - 40), splice.index + 40))}` : "",
-  );
-  check("the public chronicle has no stray code fences", !/`{3,}/.test(prose));
-  check(
-    "the public chronicle has no literal escape sequences",
-    !/(?:\/\/|\\{1,2})[nt](?![a-z])/.test(prose),
-  );
+  // MIRRORS `ARTIFACT_PATTERNS` in src/dm/narrate.ts. Kept as a copy because
+  // this is plain JS run outside the bundler; test/dm/artifact-parity.test.ts
+  // fails if the two lists drift apart.
+  const ARTIFACT_PATTERNS = [
+    ["spliced prose", /[a-z]{2}[.!?][A-Za-z0-9]/],
+    ["a stray code fence", /`{3,}/],
+    ["a literal escape sequence", /(?:\/\/|\\{1,2})[nt](?![a-z])/],
+    ["comment syntax", /(?<!:)\/\//],
+    [
+      "an AI aside",
+      /\b(?:as an AI|I should (?:not|probably)|let me (?:rewrite|try again)|ignore (?:that|the previous))\b/i,
+    ],
+    ["a self-correction", /\b(?:wait,\s*remove|remove that fragment|note to self)\b/i],
+    ["an editorial placeholder", /\[(?:note|todo|placeholder|redacted)\b/i],
+  ];
+  for (const [label, re] of ARTIFACT_PATTERNS) {
+    const hit = re.exec(prose);
+    check(
+      `the public chronicle is free of ${label}`,
+      hit === null,
+      hit
+        ? `found ${JSON.stringify(prose.slice(Math.max(0, hit.index - 50), hit.index + 50))}`
+        : "",
+    );
+  }
 
   const meAnon = await req("/api/me");
   check(

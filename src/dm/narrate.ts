@@ -152,13 +152,14 @@ function factSheet(
 /**
  * Strip the markup a model wraps around prose but does not mean as prose.
  *
- * Two classes have reached production canon and the public chronicle:
+ * Three classes have reached production canon and the public chronicle:
  *
  *   - a bare ``` closing a fence the model opened outside the JSON string;
  *   - a literal `//n` or `\n` where it meant a line break, written as text
- *     because it was already inside a JSON string and escaped it wrongly.
+ *     because it was already inside a JSON string and escaped it wrongly;
+ *   - an aside in comment syntax ("...came for.// wait, remove that fragment").
  *
- * Neither is ever legitimate in narrative prose, so both are safe to rewrite.
+ * None is ever legitimate in narrative prose, so all are safe to rewrite.
  * Stripping beats rejecting: the writing around the artifact is sound, and
  * discarding a good beat over three backticks trades it for templated text.
  *
@@ -182,6 +183,12 @@ export function normalizeProse(text: string): string {
       // leave it alone — declining the ambiguous case is the safe direction.
       .replace(/(?:\/\/|\\{1,2})n(?![a-z])/g, "\n")
       .replace(/(?:\/\/|\\{1,2})t(?![a-z])/g, " ")
+      // The model talking to itself in comment syntax, mid-prose:
+      //   "...walked away with more than they came for.// wait, remove that
+      //    fragment."
+      // `//` has no business in narrative prose at all; the only legitimate
+      // occurrence is inside a URL, where it follows a colon.
+      .replace(/(?<!:)\/\/.*/g, "")
       .replace(/[ \t]{2,}/g, " ")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
@@ -209,11 +216,33 @@ export function normalizeProse(text: string): string {
  * the right, and initialisms ("e.g.", "U.S.") have a single letter or a
  * capital before the point.
  */
-const SPLICE = /[a-z]{2}[.!?][A-Za-z0-9]/;
+/**
+ * The model breaking frame — editing itself, addressing the reader about the
+ * task, or leaving a note. Production shipped
+ * "...came for.// wait, remove that fragment."
+ *
+ * These read worse than any garbled token, because they tell the reader the
+ * prose was machine-made and unsupervised. Kept as an explicit list rather
+ * than a cleverer heuristic: a false positive here throws away a good beat, so
+ * each entry should be a phrase that cannot occur in narrative prose.
+ *
+ * **`ARTIFACT_PATTERNS` is mirrored in `scripts/smoke.mjs`** so the live
+ * chronicle is held to the same bar. `test/dm/artifact-parity.test.ts` fails if
+ * the two drift apart.
+ */
+export const ARTIFACT_PATTERNS: RegExp[] = [
+  /[a-z]{2}[.!?][A-Za-z0-9]/, // splice against terminal punctuation
+  /`{3,}/, // stray code fence
+  /(?:\/\/|\\{1,2})[nt](?![a-z])/, // literal escape sequence
+  /(?<!:)\/\//, // comment syntax in prose
+  /\b(?:as an AI|I should (?:not|probably)|let me (?:rewrite|try again)|ignore (?:that|the previous))\b/i,
+  /\b(?:wait,\s*remove|remove that fragment|note to self)\b/i,
+  /\[(?:note|todo|placeholder|redacted)\b/i,
+];
 
 /** Exported so the smoke suite can hold the *live* chronicle to the same bar. */
 export function looksCorrupted(text: string): boolean {
-  return SPLICE.test(text) || /`{3,}/.test(text) || /(?:\/\/|\\{1,2})[nt](?![a-z])/.test(text);
+  return ARTIFACT_PATTERNS.some((re) => re.test(text));
 }
 
 /**
@@ -229,7 +258,7 @@ function usable(prose: unknown, situation: unknown): prose is string {
   const text = prose.trim();
   if (text.length < 40 || text.length > 8000) return false;
   if (situation.trim().length === 0) return false;
-  if (SPLICE.test(text)) return false;
+  if (looksCorrupted(text)) return false;
 
   return true;
 }

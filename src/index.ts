@@ -193,7 +193,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (campaign.public_chronicle !== 1 && !(session && (await isMember(env, campaign.id, session.playerId)))) {
       return new Response("This chronicle is private.", { status: 403 });
     }
-    return renderChronicle(env, campaign);
+    // `?before=<tick>` pages backwards through the whole campaign. A plain
+    // query parameter and plain links, so the archive stays reachable with no
+    // JavaScript — which is the point of a chronicle you can still read years
+    // later.
+    const beforeRaw = url.searchParams.get("before");
+    const before = beforeRaw !== null && /^\d{1,9}$/.test(beforeRaw) ? Number(beforeRaw) : null;
+    return renderChronicle(env, campaign, before);
   }
 
   // ─── joining by invitation ─────────────────────────────────────────────
@@ -447,6 +453,36 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         return fail(403, "only the host can rebuild the chronicle");
       }
       const out = await campaignStub.reproject();
+      return json({ ok: true, ...out });
+    }
+
+    if (action === "/pace" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can change the pace");
+      }
+      const body = await readJson<{ cadence?: string; quorumFraction?: number }>(request);
+      if (body?.cadence !== undefined && !["daily", "weekly", "monthly"].includes(body.cadence)) {
+        return fail(400, "invalid cadence");
+      }
+      if (
+        body?.quorumFraction !== undefined &&
+        (typeof body.quorumFraction !== "number" ||
+          !Number.isFinite(body.quorumFraction) ||
+          body.quorumFraction <= 0 ||
+          body.quorumFraction > 1)
+      ) {
+        return fail(400, "quorum must be a fraction above 0 and at most 1");
+      }
+      const out = await campaignStub.setPace({
+        cadence: body?.cadence as "daily" | "weekly" | "monthly" | undefined,
+        quorumFraction: body?.quorumFraction,
+      });
+      // The projection carries cadence too, so the campaign list stays honest.
+      if (body?.cadence) {
+        await env.DB.prepare("UPDATE campaigns SET cadence = ? WHERE id = ?")
+          .bind(body.cadence, campaign.id)
+          .run();
+      }
       return json({ ok: true, ...out });
     }
 

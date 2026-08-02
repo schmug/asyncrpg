@@ -76,6 +76,8 @@ export interface CampaignSnapshot {
   situation: string;
   tension: number;
   deadlineAt: number | null;
+  /** The group's current clock, so the host controls can show what is set. */
+  pace: { cadence: string; quorumFraction: number };
   quorum: { need: number; have: number; active: number };
   cast: {
     characterId: string;
@@ -484,8 +486,55 @@ export class CampaignDO extends DurableObject<Env> {
     }
 
     const history = this.#get<WorldEvent[]>("history") ?? [];
+
+    // Recaps for players coming back from a long absence must reach further
+    // than the DO's rolling event buffer. That buffer is capped so DO storage
+    // stays bounded, which is right — but a player returning after months
+    // would then get a recap built from events that all postdate the ones they
+    // actually missed, which is precisely the case the promise is about.
+    //
+    // D1 holds every projected event for the campaign, so the gap is filled
+    // from there for exactly the players who need it. Best-effort: a recap is
+    // a courtesy, and failing to build one must never stop a tick resolving.
+    const oldestRetained = history[0]?.tick ?? world.tick;
+    const acting = new Set(submitted.map((a) => a.playerId));
+    const returningFromBefore = Object.values(world.characters)
+      .filter((c) => c.presence === "offscreen" && acting.has(c.playerId))
+      .map((c) => c.lastActedTick)
+      .filter((t) => t < oldestRetained);
+
+    let recapHistory = history;
+    if (returningFromBefore.length > 0) {
+      try {
+        const from = Math.min(...returningFromBefore);
+        const older = await this.env.DB.prepare(
+          `SELECT tick, kind, summary, significance FROM events
+           WHERE campaign_id = ? AND tick > ? AND tick < ? AND significance >= 55
+           ORDER BY significance DESC LIMIT 200`,
+        )
+          .bind(world.campaignId, from, oldestRetained)
+          .all<{ tick: number; kind: string; summary: string; significance: number }>();
+        const rows = (older.results ?? []).map(
+          (e) =>
+            ({
+              tick: e.tick,
+              kind: e.kind,
+              summary: e.summary,
+              significance: e.significance,
+              actorId: null,
+              targetIds: [],
+              regionId: null,
+              data: {},
+            }) as unknown as WorldEvent,
+        );
+        if (rows.length > 0) recapHistory = [...rows, ...history];
+      } catch (err) {
+        console.error("could not widen recap history from D1", err);
+      }
+    }
+
     const before = structuredClone(world);
-    const result = runTick(world, submitted, config, { history });
+    const result = runTick(world, submitted, config, { history: recapHistory });
 
     // The sim is canon, so a tick that would corrupt it is discarded whole
     // rather than half-written. Rolling back to the last good state keeps the
@@ -827,6 +876,7 @@ export class CampaignDO extends DurableObject<Env> {
       situation: world.scene.situation,
       tension: Math.round(world.scene.tension),
       deadlineAt: this.#get<number>("deadlineAt"),
+      pace: { cadence: config.cadence, quorumFraction: config.quorumFraction },
       quorum: {
         need: quorumSize(world, config),
         have: [...pendingIds].filter((id) => active.some((c) => c.playerId === id)).length,
@@ -863,6 +913,30 @@ export class CampaignDO extends DurableObject<Env> {
    * working, so the only honest resume is one a person asked for after looking
    * at the violations.
    */
+  /**
+   * Change the group's clock mid-campaign.
+   *
+   * Groups discover their real pace by playing: a table that signed up for
+   * daily and is managing weekly should be able to say so without starting
+   * over. The pending deadline is recomputed from the *current* tick, so
+   * slowing down does not strand a deadline that has already passed and
+   * speeding up does not fire one instantly.
+   */
+  async setPace(
+    next: { cadence?: Cadence; quorumFraction?: number },
+  ): Promise<{ cadence: Cadence; quorumFraction: number }> {
+    const config = this.#config();
+    const cadence = next.cadence ?? config.cadence;
+    const quorumFraction =
+      next.quorumFraction === undefined
+        ? config.quorumFraction
+        : Math.min(1, Math.max(0.1, next.quorumFraction));
+
+    this.#put("config", { ...config, cadence, quorumFraction });
+    await this.#scheduleNextTick();
+    return { cadence, quorumFraction };
+  }
+
   async resume(): Promise<{ resumed: boolean; wasHalted: boolean }> {
     const wasHalted = Boolean(this.#get<number>("haltedAt"));
     this.#put("blockedRuns", 0);

@@ -255,6 +255,18 @@ function renderCampaign(data) {
 
   // Only the host can invite, so only the host is offered it.
   $("invite-box").hidden = !data.isHost;
+  if (data.isHost && c.pace) {
+    // Show what is actually set, so the host is editing rather than guessing.
+    $("pace-cadence").value = c.pace.cadence;
+    const options = [...$("pace-quorum").options];
+    const nearest = options.reduce((best, o) =>
+      Math.abs(Number(o.value) - c.pace.quorumFraction) <
+      Math.abs(Number(best.value) - c.pace.quorumFraction)
+        ? o
+        : best,
+    );
+    $("pace-quorum").value = nearest.value;
+  }
 
   $("c-chronicle").href = `/c/${encodeURIComponent(c.slug)}`;
   show("view-campaign");
@@ -364,6 +376,27 @@ $("back").addEventListener("click", () => {
 });
 
 // ─── invitations ───────────────────────────────────────────────────────────
+
+$("pace-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.target.querySelector("button");
+  button.disabled = true;
+  try {
+    await api(`/api/campaigns/${encodeURIComponent(currentSlug)}/pace`, {
+      method: "POST",
+      body: JSON.stringify({
+        cadence: $("pace-cadence").value,
+        quorumFraction: Number($("pace-quorum").value),
+      }),
+    });
+    say("Pace updated.", "ok");
+    await load();
+  } catch (err) {
+    say(err.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("resume-btn").addEventListener("click", async () => {
   const button = $("resume-btn");

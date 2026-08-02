@@ -72,6 +72,9 @@ footer{margin-top:3.5rem;padding-top:1.1rem;border-top:1px solid var(--rule);
   color:var(--muted);font-size:.82rem}
 a{color:var(--accent)}
 .empty{color:var(--muted);font-style:italic}
+.pager{display:flex;justify-content:space-between;gap:1rem;margin:1.5rem 0 2.5rem;
+  padding-top:1rem;border-top:1px solid var(--rule);font:600 .82rem/1 system-ui,sans-serif}
+.pager a{padding:.7rem 0;min-height:2.75rem;display:flex;align-items:center}
 .sofar-box{background:var(--card);border:1px solid var(--rule);border-radius:10px;
   padding:.4rem 1.25rem 1.1rem;margin:0 0 2.4rem}
 .sofar-box h2{margin-top:1.4rem}
@@ -103,12 +106,16 @@ const KIND_LABEL: Record<string, string> = {
  * from the projected facts rather than narrated, so it costs no inference and
  * cannot contradict canon.
  */
-function soFar(beats: BeatRow[], events: EventRow[], entities: EntityRow[]): string {
+function soFar(
+  beats: BeatRow[],
+  events: EventRow[],
+  entities: EntityRow[],
+  totalTurns: number,
+): string {
   if (beats.length === 0) return "";
 
   const cast = entities.filter((e) => e.kind === "character");
-  const ticks = beats.map((b) => b.tick);
-  const span = Math.max(...ticks) - Math.min(...ticks) + 1;
+  const span = totalTurns;
 
   const biggest = [...events]
     .filter((e) => e.significance >= 70)
@@ -136,6 +143,32 @@ function soFar(beats: BeatRow[], events: EventRow[], entities: EntityRow[]): str
     what +
     `</section>`
   );
+}
+
+/**
+ * Links to the rest of the campaign.
+ *
+ * Plain anchors with a query parameter, deliberately: a chronicle whose older
+ * turns need JavaScript to reach is not an archive, and the whole claim here is
+ * that a group can still read this in a year. `?before=<tick>` is stable, so a
+ * link into the middle of a long campaign keeps working as it grows.
+ */
+function pager(
+  slug: string,
+  before: number | null,
+  oldestOnPage: number | null,
+  hasOlder: boolean,
+): string {
+  if (!hasOlder && before === null) return "";
+  const base = `/c/${encodeURIComponent(slug)}`;
+  const links: string[] = [];
+  if (hasOlder && oldestOnPage !== null) {
+    links.push(`<a href="${base}?before=${oldestOnPage}">← Earlier turns</a>`);
+  }
+  if (before !== null) {
+    links.push(`<a href="${base}">Back to the latest →</a>`);
+  }
+  return `<nav class="pager">${links.join("")}</nav>`;
 }
 
 /** "a, b and c" — an Oxford-comma-free list, because this is prose. */
@@ -221,22 +254,37 @@ function chapterTitle(summary: string): string {
   return (cut.length > 72 ? `${cut.slice(0, 69).trimEnd()}…` : cut) || "An eventful turn";
 }
 
-export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<Response> {
-  const [beats, events, entities, journals, letters, history] = await Promise.all([
+/** Turns rendered on one page. One extra row is fetched to detect an older page. */
+const PAGE = 25;
+
+export async function renderChronicle(
+  env: Env,
+  campaign: CampaignRow,
+  /** Show turns strictly older than this. Null starts at the most recent. */
+  before: number | null = null,
+): Promise<Response> {
+  const [beats, events, entities, journals, letters, history, totals] = await Promise.all([
     env.DB.prepare(
-      "SELECT tick, prose, source, created_at FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 25",
+      before === null
+        ? `SELECT tick, prose, source, created_at FROM beats WHERE campaign_id = ?
+           ORDER BY tick DESC LIMIT ${PAGE + 1}`
+        : `SELECT tick, prose, source, created_at FROM beats WHERE campaign_id = ? AND tick < ?2
+           ORDER BY tick DESC LIMIT ${PAGE + 1}`,
     )
-      .bind(campaign.id)
+      .bind(...(before === null ? [campaign.id] : [campaign.id, before]))
       .all<BeatRow>(),
     // Tick 0 is the generated pre-play history — decades of it. Mixed into the
     // live timeline it drowns everything the group actually did, which is the
     // opposite of what a chronicle is for. Queried and rendered separately.
+    // Scoped to the same page as the beats, so an older page's chapters are
+    // named by the events of *that* stretch rather than by recent ones.
     env.DB.prepare(
       `SELECT tick, kind, summary, significance FROM events
-       WHERE campaign_id = ? AND tick > 0 AND significance >= 55
-       ORDER BY tick DESC, significance DESC LIMIT 60`,
+       WHERE campaign_id = ?1 AND tick > 0 AND significance >= 55
+         AND (?2 IS NULL OR tick < ?2)
+       ORDER BY tick DESC, significance DESC LIMIT 200`,
     )
-      .bind(campaign.id)
+      .bind(campaign.id, before)
       .all<EventRow>(),
     env.DB.prepare(
       "SELECT entity_id, kind, name, data FROM entities WHERE campaign_id = ? ORDER BY kind, name",
@@ -247,7 +295,7 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
       `SELECT j.tick, j.title, j.body, COALESCE(e.name, 'Someone') AS who
        FROM journals j LEFT JOIN entities e
          ON e.campaign_id = j.campaign_id AND e.entity_id = j.character_id
-       WHERE j.campaign_id = ? ORDER BY j.tick DESC, j.rowid DESC LIMIT 20`,
+       WHERE j.campaign_id = ? ORDER BY j.tick DESC, j.rowid DESC LIMIT 60`,
     )
       .bind(campaign.id)
       .all<{ tick: number; title: string; body: string; who: string }>(),
@@ -258,7 +306,7 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
        FROM letters l
        LEFT JOIN entities f ON f.campaign_id = l.campaign_id AND f.entity_id = l.from_character
        LEFT JOIN entities t ON t.campaign_id = l.campaign_id AND t.entity_id = l.to_character
-       WHERE l.campaign_id = ? ORDER BY l.tick DESC, l.rowid DESC LIMIT 20`,
+       WHERE l.campaign_id = ? ORDER BY l.tick DESC, l.rowid DESC LIMIT 60`,
     )
       .bind(campaign.id)
       .all<{ tick: number; body: string; sender: string; recipient: string }>(),
@@ -269,11 +317,23 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     )
       .bind(campaign.id)
       .all<EventRow>(),
+    env.DB.prepare(
+      `SELECT COUNT(*) AS turns, MIN(tick) AS firstTick, MAX(tick) AS lastTick
+       FROM beats WHERE campaign_id = ?`,
+    )
+      .bind(campaign.id)
+      .first<{ turns: number; firstTick: number | null; lastTick: number | null }>(),
   ]);
 
-  const beatRows = beats.results ?? [];
+  // One extra row was fetched purely to answer "is there an older page?".
+  const page = beats.results ?? [];
+  const hasOlder = page.length > PAGE;
+  const beatRows = hasOlder ? page.slice(0, PAGE) : page;
   const eventRows = events.results ?? [];
   const entityRows = entities.results ?? [];
+
+  const totalTurns = totals?.turns ?? beatRows.length;
+  const oldestOnPage = beatRows.at(-1)?.tick ?? null;
 
   // Turns grouped into chapters, each named for the most consequential thing
   // that happened inside it. An undifferentiated stack of numbered turns is a
@@ -451,9 +511,12 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     `<meta property="og:title" content="${escapeHtml(title)}">` +
     `<style>${CSS}</style></head><body><div class="wrap">` +
     `<header><h1>${escapeHtml(campaign.name)}</h1>` +
-    `<p class="sub">A chronicle in ${beatRows.length} recorded turn${beatRows.length === 1 ? "" : "s"}.</p></header>` +
-    soFar(beatRows, eventRows, entityRows) +
+    `<p class="sub">A chronicle in ${totalTurns} recorded turn${totalTurns === 1 ? "" : "s"}` +
+    (before !== null ? `, showing those before turn ${before}` : "") +
+    `.</p></header>` +
+    (before === null ? soFar(beatRows, eventRows, entityRows, totalTurns) : "") +
     `<h2>Turns</h2>${beatHtml}` +
+    pager(campaign.slug, before, oldestOnPage, hasOlder) +
     `<h2>Turning points</h2>${timelineHtml}` +
     journalHtml +
     letterHtml +

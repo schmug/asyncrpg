@@ -9,7 +9,7 @@
  */
 
 import { describe, expect, it } from "vitest";
-import { restoreStanding } from "../../src/sim/character";
+import { buildRecap, restoreStanding } from "../../src/sim/character";
 import type { Character, WorldState } from "../../src/sim/types";
 
 function character(id: string, renown: number, bonds: Record<string, number> = {}): Character {
@@ -35,6 +35,39 @@ function world(...cast: Character[]): WorldState {
     characters: Object.fromEntries(cast.map((c) => [c.id, c])),
   } as unknown as WorldState;
 }
+
+describe("buildRecap beyond the retained window", () => {
+  const event = (tick: number, summary: string, significance = 60) =>
+    ({ tick, kind: "world", summary, significance }) as never;
+
+  it("recaps only what happened after the player went quiet", () => {
+    const history = [event(1, "before they left"), event(5, "while away"), event(9, "later still")];
+    expect(buildRecap(history, 3)).toEqual(["while away", "later still"]);
+  });
+
+  it("reaches events older than the rolling buffer once they are supplied", () => {
+    // The DO keeps a bounded event buffer; a player returning after months
+    // would otherwise be recapped only on events postdating the ones they
+    // actually missed. campaign-do widens the history from D1 before calling
+    // this, so the property to hold here is that old events are used when
+    // present rather than silently dropped for being old.
+    const widened = [event(2, "the war began", 90), event(400, "a recent skirmish", 60)];
+    expect(buildRecap(widened, 1)).toContain("the war began");
+  });
+
+  it("leads with what mattered most, then reads in order", () => {
+    const history = [
+      event(4, "a minor errand", 55),
+      event(6, "the city fell", 95),
+      event(8, "a rumour", 56),
+    ];
+    expect(buildRecap(history, 3, 2)).toEqual(["the city fell", "a rumour"]);
+  });
+
+  it("returns nothing when nothing happened while they were away", () => {
+    expect(buildRecap([event(1, "old news")], 5)).toEqual([]);
+  });
+});
 
 describe("restoreStanding", () => {
   it("lifts a returning character to the middle of the party", () => {
