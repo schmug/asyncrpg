@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it } from "vitest";
-import { ACTION_SPECS, resolveAction } from "../../src/sim/actions";
+import { ACTION_SPECS, normalizeIntent, resolveAction } from "../../src/sim/actions";
 import { EventLog } from "../../src/sim/events";
 import { generateWorld } from "../../src/sim/genesis";
 import { checkWorldInvariants } from "../../src/sim/invariants";
@@ -253,5 +253,69 @@ describe("resolveAction", () => {
     expect(() =>
       resolveAction(state, action({ kind: "aid", characterId: "chr_missing" }), new Rng(1), new EventLog(1)),
     ).toThrow(/chr_missing/);
+  });
+});
+
+describe("normalizeIntent", () => {
+  // Every case here was live in production and visible in the chronicle.
+  it("strips a duplicated leading character name", () => {
+    expect(normalizeIntent("Bram checks the stores and counts what remains.", "Bram Ashfoot")).toBe(
+      "checks the stores and counts what remains",
+    );
+    expect(normalizeIntent("Bram Ashfoot tends the wounded", "Bram Ashfoot")).toBe("tends the wounded");
+  });
+
+  it("lowercases a sentence-style capital", () => {
+    expect(normalizeIntent("Sets up to listen to people while working.", "Bram Ashfoot")).toBe(
+      "sets up to listen to people while working",
+    );
+  });
+
+  it("strips trailing punctuation that would split the sentence", () => {
+    expect(normalizeIntent("follows tracks out past the last field to investigate.", "Sela")).toBe(
+      "follows tracks out past the last field to investigate",
+    );
+  });
+
+  it("keeps a proper noun capitalised", () => {
+    expect(normalizeIntent("The Grey Blight is spreading", "Kestrel")).toBe(
+      "The Grey Blight is spreading",
+    );
+  });
+
+  it("is idempotent", () => {
+    const once = normalizeIntent("Bram checks the stores.", "Bram Ashfoot");
+    expect(normalizeIntent(once, "Bram Ashfoot")).toBe(once);
+  });
+
+  it("handles empty and name-only input without producing nonsense", () => {
+    expect(normalizeIntent("", "Bram Ashfoot")).toBe("");
+    expect(normalizeIntent("Bram Ashfoot", "Bram Ashfoot")).toBe("");
+  });
+
+  it("does not strip a name that merely appears mid-sentence", () => {
+    expect(normalizeIntent("asks Bram about the debt", "Bram Ashfoot")).toBe(
+      "asks Bram about the debt",
+    );
+  });
+
+  it("tolerates a name containing regex metacharacters", () => {
+    expect(() => normalizeIntent("does a thing", "K. (the) [Rook]")).not.toThrow();
+  });
+});
+
+describe("chronicle lines are grammatical", () => {
+  it("never doubles the character name in an event summary", () => {
+    const state = generateWorld("gram", seedFrom("gram", 0, "genesis"), { historyYears: 20 }).state;
+    state.tick = 1;
+    const c = makeCharacter(state);
+    c.name = "Bram Ashfoot";
+    for (const intent of ["Bram checks the stores.", "Sets up to listen.", "Bram Ashfoot waits."]) {
+      const log = new EventLog(1);
+      const r = resolveAction(state, action({ kind: "aid", intent }), new Rng(seedFrom("g", 1)), log);
+      const summary = r.events[0]!.summary;
+      expect(summary).not.toMatch(/Bram Ashfoot Bram/);
+      expect(summary).not.toMatch(/[a-z]\.\s+[a-z]/);
+    }
   });
 });

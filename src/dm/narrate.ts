@@ -164,11 +164,15 @@ function usable(prose: unknown, situation: unknown): prose is string {
   if (text.length < 40 || text.length > 8000) return false;
   if (situation.trim().length === 0) return false;
 
-  // A lowercase letter immediately after sentence-ending punctuation, with no
-  // space. Real prose has decimals ("1.5") and ellipses, so digits and
-  // repeated punctuation are excluded.
-  const fusedSentences = text.match(/[a-z]{2}[.!?][a-z]{2}/g);
-  if (fusedSentences && fusedSentences.length >= 2) return false;
+  // Truncation artifacts: a letter or digit jammed against the end of a word
+  // with no space after terminal punctuation. Production produced both
+  // "evening.ot. of it.was" (letters) and "he'd finished.732" (digits), so
+  // both shapes are caught. A single occurrence is enough for the digit form,
+  // which has no legitimate reading here; decimals are excluded because they
+  // need a digit on the *left* of the point too.
+  if (/[a-z]{2}[.!?]\d/.test(text)) return false;
+  const fused = text.match(/[a-z]{2}[.!?][a-z]{2}/g);
+  if (fused && fused.length >= 2) return false;
 
   return true;
 }

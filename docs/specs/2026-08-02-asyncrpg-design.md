@@ -120,6 +120,33 @@ first. An eager group moves fast; a slow group still moves.
 **Never, for any length of absence:** stat loss, item loss, death, removal, or
 missed-content penalty.
 
+### What "no penalty" precisely means
+
+An independent review found the promise, as originally worded, overclaimed.
+Stating it exactly:
+
+**Guaranteed, and enforced by tests.** For any length of absence, a character
+never loses attributes, skills, renown, items, or conditions; never dies or is
+removed; and never has content locked away from them. An action the DM takes on
+their behalf is floored *and capped* at a partial success, cannot apply a
+condition, cannot reduce renown, and cannot advance the absence clock. There is
+no level, no XP, and no gear treadmill to fall behind on. A player who joins at
+tick 200 starts from the same spread as one who joined at tick 1.
+
+**Not guaranteed, and deliberately so.** A player who plays more accrues more
+*story presence* — more entries in the chronicle, warmer relationships with
+NPCs, a wider reputation. That is the point of the depth features, which were
+requested precisely so that people who want to do more can. Renown feeds
+difficulty, so a well-known character faces different situations, not easier
+ones; and it is shown as a phrase rather than a score so it does not read as a
+leaderboard.
+
+The distinction is between *penalty* and *difference*. Being away costs you
+nothing. Being present earns you a place in the story. A design where those two
+were identical would have nothing for the engaged player to do, which was an
+explicit requirement.
+
+
 There is also **no XP ladder to fall behind on.** Advancement is reputation and
 relationships recorded by the sim — you become *known for* things — not levels.
 A player who misses 30 ticks is not mechanically behind the group; they simply

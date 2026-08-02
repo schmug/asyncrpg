@@ -6,8 +6,13 @@ and a language model as dungeon master.
 Your group picks a cadence — daily, weekly, or monthly — and the story advances
 on that clock, forever if you want. Miss a week because life happened and
 nothing bad occurs: your character keeps acting in character, then quietly
-steps offscreen, then rejoins with a recap whenever you come back. There is no
-XP ladder to fall behind on and no penalty of any kind for absence.
+steps offscreen, then rejoins with a recap whenever you come back.
+
+Precisely: absence never costs you attributes, skills, renown, items,
+conditions, your life, or access to anything, and there is no XP ladder to fall
+behind on. It does mean fewer entries in the chronicle than someone who played
+every week — story presence is the one thing engagement buys, and it buys
+nothing mechanical. See the spec for why that line is drawn where it is.
 
 Play from your inbox. A richer web interface is there if you want it.
 

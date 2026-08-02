@@ -43,6 +43,19 @@ export function normalizeEmail(raw: string): string | null {
   return value;
 }
 
+/** Title-case an email local part into something usable as a name. */
+export function defaultDisplayName(email: string): string {
+  const local = (email.split("@")[0] ?? "player").replace(/[._+-]+/g, " ").trim();
+  return (
+    local
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((w) => w.charAt(0).toUpperCase() + w.slice(1))
+      .join(" ")
+      .slice(0, 60) || "Player"
+  );
+}
+
 export async function findOrCreatePlayer(env: Env, email: string): Promise<string> {
   const existing = await env.DB.prepare("SELECT id FROM players WHERE email = ?")
     .bind(email)
@@ -53,7 +66,10 @@ export async function findOrCreatePlayer(env: Env, email: string): Promise<strin
   await env.DB.prepare(
     "INSERT INTO players (id, email, display_name, created_at) VALUES (?, ?, ?, ?)",
   )
-    .bind(id, email, email.split("@")[0] ?? "player", new Date().toISOString())
+    // The local part becomes the default character name if they never set
+    // one, and "kestrel" reads as a typo in prose where every other name is
+    // capitalised.
+    .bind(id, email, defaultDisplayName(email), new Date().toISOString())
     .run();
   return id;
 }

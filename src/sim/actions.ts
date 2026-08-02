@@ -113,6 +113,35 @@ const bump = (rec: Record<string, number>, key: string, by: number): void => {
   rec[key] = clamp((rec[key] ?? 0) + by, -100, 100);
 };
 
+/**
+ * Make a model-written intent safe to splice into a sentence.
+ *
+ * The intent lands inside `"<Name> <intent><detail>, and it works."`, so any
+ * of these produce visible garbage in the chronicle:
+ *   - leading character name      -> "Bram Ashfoot Bram checks the stores"
+ *   - sentence capitalization     -> "Bram Ashfoot Sets up to listen"
+ *   - trailing punctuation        -> "...to investigate. through Ryarguscrag"
+ * All three were live in production before this existed.
+ */
+export function normalizeIntent(intent: string, characterName: string): string {
+  let text = intent.replace(/\s+/g, " ").trim();
+
+  // Strip the character's name, or any leading word of it, from the front.
+  const names = [characterName, ...characterName.split(/\s+/)].filter((n) => n.length >= 3);
+  for (const name of names) {
+    const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    text = text.replace(new RegExp(`^${escaped}\\b[\\s,:'"-]*`, "i"), "").trim();
+  }
+
+  text = text.replace(/[.!?;,\s]+$/, "");
+  // Lowercase a leading capital unless it looks like a proper noun (two caps
+  // in a row, or a following capitalized word — "Ashfall", "The Grey Blight").
+  if (/^[A-Z][a-z]/.test(text) && !/^[A-Z][a-z]+ [A-Z]/.test(text)) {
+    text = text.charAt(0).toLowerCase() + text.slice(1);
+  }
+  return text.slice(0, 160);
+}
+
 const OUTCOME_PHRASE: Record<Outcome, string> = {
   critical_success: "and it goes better than anyone expected",
   success: "and it works",
@@ -313,10 +342,11 @@ export function resolveAction(
     100,
   );
 
+  const phrase = normalizeIntent(action.intent || spec.hint, character.name) || spec.hint;
   const events = [
     log.add(
       "player_action",
-      `${character.name} ${action.intent || spec.hint}${detail}, ${OUTCOME_PHRASE[outcome]}.`,
+      `${character.name} ${phrase}${detail}, ${OUTCOME_PHRASE[outcome]}.`,
       {
         actorId: character.id,
         targetIds: target ? [target] : [],

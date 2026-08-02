@@ -49,12 +49,12 @@ const SCRIPT = [
   ["I write down everything that happened while it's fresh.", "I sit with the ones who lost someone.", "I check the water one more time before I sleep."],
 ];
 
-function seedPlayer(label) {
+function seedPlayer(label, displayName) {
   const email = `demo+${label}@example.invalid`;
   const playerId = `plr_demo${label}`;
   const token = randomBytes(32).toString("hex");
   d1(
-    `INSERT OR REPLACE INTO players (id, email, display_name, created_at) VALUES ('${esc(playerId)}','${esc(email)}','${esc(label)}','${new Date().toISOString()}');` +
+    `INSERT OR REPLACE INTO players (id, email, display_name, created_at) VALUES ('${esc(playerId)}','${esc(email)}','${esc(displayName)}','${new Date().toISOString()}');` +
       `INSERT INTO auth_tokens (token_hash, player_id, purpose, expires_at) VALUES ('${sha256(token)}','${esc(playerId)}','session',${Date.now() + 3600_000});`,
   );
   return { playerId, cookie: `arpg_session=${token}` };
@@ -95,7 +95,7 @@ async function main() {
       `DELETE FROM campaigns WHERE slug='${esc(SLUG)}';`,
   );
 
-  const players = CAST.map((c) => ({ ...c, ...seedPlayer(c.label) }));
+  const players = CAST.map((c) => ({ ...c, ...seedPlayer(c.label, c.name) }));
   const host = players[0];
 
   const created = await req("/api/campaigns", {
@@ -106,12 +106,6 @@ async function main() {
   if (created.status !== 201) throw new Error(`create failed: ${created.status} ${created.text}`);
   console.log(`created campaign ${SLUG}`);
 
-  // Give the host the intended character name, then bring in the others.
-  await req(`/api/campaigns/${SLUG}/join`, {
-    method: "POST",
-    cookie: host.cookie,
-    body: { name: host.name, concept: host.concept },
-  });
   // Joining is invite-only, so the demo walks the same path a real group does.
   const invite = await req(`/api/campaigns/${SLUG}/invite`, { method: "POST", cookie: host.cookie });
   if (invite.status !== 200) throw new Error(`invite failed: ${invite.text}`);
