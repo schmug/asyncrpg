@@ -298,6 +298,124 @@ describe("narrateBeat degradation", () => {
     }
   });
 
+  it("rejects a beat that was cut off at max_tokens", async () => {
+    // Structured outputs keep truncated JSON parseable, so the only reliable
+    // signal that generation finished is stop_reason. This case reached
+    // production once: a truncated beat parsed fine and was stored as prose.
+    const state = world();
+    const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);
+    const original = globalThis.fetch;
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          stop_reason: "max_tokens",
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify({
+                prose: "The envoy waits at the gate, mud to the knee. ".repeat(4),
+                situation: "at the gate",
+              }),
+            },
+          ],
+          usage: { input_tokens: 100, output_tokens: 6000 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const beat = await narrateBeat(
+        { ...NO_KEY, apiKey: "sk-ant-test" },
+        state,
+        r.events,
+        r.resolutions,
+        UNLIMITED_BUDGET,
+      );
+      expect(beat.source).toBe("templated");
+      expect(beat.degradedReason).toMatch(/max_tokens/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("rejects visibly mangled prose even when the response claims to be complete", async () => {
+    const state = world();
+    const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);
+    const original = globalThis.fetch;
+    // Real corruption observed in production: sentences fused with no space
+    // after terminal punctuation.
+    const mangled =
+      "The morning settles cold over Dahold, and there is work enough to keep three pairs " +
+      "of hands busy without anyone needing to invent trouble.ot. of it.was about to boil " +
+      "over on the narrow lane, and Kestrel plants themself between the two knots of men.";
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: JSON.stringify({ prose: mangled, situation: "here" }) }],
+          usage: { input_tokens: 100, output_tokens: 200 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const beat = await narrateBeat(
+        { ...NO_KEY, apiKey: "sk-ant-test" },
+        state,
+        r.events,
+        r.resolutions,
+        UNLIMITED_BUDGET,
+      );
+      expect(beat.source).toBe("templated");
+      expect(beat.degradedReason).toMatch(/validation/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it("does not mistake ordinary prose for corruption", async () => {
+    const state = world();
+    const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);
+    const original = globalThis.fetch;
+    // Decimals, ellipses, abbreviations, and em-dashes must all pass.
+    const fine =
+      "The tithe came to 1.5 measures of grain, no more. Bram counted it twice... then a " +
+      "third time. Mrs. Vane watched from the door — she always watched — and said nothing " +
+      "at all until the cart had gone. It was not a good morning, but it was an honest one.";
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: JSON.stringify({ prose: fine, situation: "here" }) }],
+          usage: { input_tokens: 100, output_tokens: 200 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const beat = await narrateBeat(
+        { ...NO_KEY, apiKey: "sk-ant-test" },
+        state,
+        r.events,
+        r.resolutions,
+        UNLIMITED_BUDGET,
+      );
+      expect(beat.source).toBe("model");
+      expect(beat.prose).toContain("1.5 measures");
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("falls back when the model declines the request", async () => {
     const state = world();
     const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);

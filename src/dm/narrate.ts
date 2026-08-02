@@ -140,15 +140,28 @@ function factSheet(
   ].join("\n");
 }
 
-/** Reject prose that is empty, truncated, or absurdly long before it is stored. */
+/**
+ * Reject prose that is empty, absurdly long, or visibly mangled.
+ *
+ * The mangling check is a backstop behind the `stop_reason` guard: truncated
+ * structured output shows up as sentences fused without a space after
+ * terminal punctuation ("evening.ot. of it.was about to"), which is not
+ * something normal prose does. Cheap to check, and a garbled beat is worse
+ * than a plain templated one.
+ */
 function usable(prose: unknown, situation: unknown): prose is string {
-  return (
-    typeof prose === "string" &&
-    typeof situation === "string" &&
-    prose.trim().length >= 40 &&
-    prose.length <= 8000 &&
-    situation.trim().length > 0
-  );
+  if (typeof prose !== "string" || typeof situation !== "string") return false;
+  const text = prose.trim();
+  if (text.length < 40 || text.length > 8000) return false;
+  if (situation.trim().length === 0) return false;
+
+  // A lowercase letter immediately after sentence-ending punctuation, with no
+  // space. Real prose has decimals ("1.5") and ellipses, so digits and
+  // repeated punctuation are excluded.
+  const fusedSentences = text.match(/[a-z]{2}[.!?][a-z]{2}/g);
+  if (fusedSentences && fusedSentences.length >= 2) return false;
+
+  return true;
 }
 
 export async function narrateBeat(
@@ -171,9 +184,10 @@ export async function narrateBeat(
     const client = new Anthropic({ apiKey: cfg.apiKey });
     const response = await client.messages.create({
       model: cfg.narrateModel,
-      // Room for adaptive thinking plus the beat itself; well under the
-      // ~16k threshold where non-streaming risks an SDK HTTP timeout.
-      max_tokens: 6000,
+      // `max_tokens` covers thinking AND output, and Sonnet 5 runs adaptive
+      // thinking whenever `thinking` is omitted. A 350-word beat needs ~500
+      // tokens; the rest is headroom so thinking cannot crowd out the prose.
+      max_tokens: 12000,
       system: SYSTEM,
       // Narration is a writing task, not a reasoning one — low effort keeps
       // latency and cost down without hurting prose quality.
@@ -183,6 +197,14 @@ export async function narrateBeat(
 
     if (response.stop_reason === "refusal") {
       return { ...fallback, source: "templated", degradedReason: "model declined the request" };
+    }
+
+    // Structured outputs keep the JSON *parseable* when generation is cut
+    // short, so a truncated beat parses cleanly and reads as spliced
+    // half-sentences. `JSON.parse` succeeding is not evidence the response
+    // finished — only `stop_reason` is.
+    if (response.stop_reason === "max_tokens") {
+      return { ...fallback, source: "templated", degradedReason: "model output hit max_tokens" };
     }
 
     const text = response.content.find((b) => b.type === "text");
