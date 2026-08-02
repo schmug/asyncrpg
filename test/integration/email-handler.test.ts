@@ -198,6 +198,68 @@ describe("inbound email handler", () => {
     });
   });
 
+  describe("sender identification", () => {
+    it("accepts a reply whose envelope sender was rewritten by the provider", async () => {
+      // Found by the live round-trip test: Cloudflare Email Sending rewrites
+      // the SMTP MAIL FROM to `bounces@cf-bounce.<domain>`, so authenticating
+      // on the envelope alone rejected every legitimate reply that had passed
+      // through it. Mailing lists and forwarders do the same thing.
+      const state = await deliver(
+        mime({
+          from: PLAYER_EMAIL,
+          to: INBOX,
+          subject: `Re: [Test Hold #${CODE}] Tick 3`,
+          body: "I hold the gate.",
+        }),
+        "bounces@cf-bounce.example.com",
+      );
+      expect(state.rejected).toBe(false);
+    });
+
+    it("still rejects when neither the envelope nor the header names a player", async () => {
+      const state = await deliver(
+        mime({
+          from: "stranger@example.com",
+          to: INBOX,
+          subject: `Re: [Test Hold #${CODE}] Tick 3`,
+          body: "I take the crown.",
+        }),
+        "bounces@cf-bounce.example.com",
+      );
+      expect(state.rejected).toBe(true);
+      expect(state.reason).toMatch(/not registered/i);
+    });
+
+    it("does not let a header From alone impersonate another player on a bound reply", async () => {
+      // The binding names PLAYER; a message claiming to be from a different
+      // member must not be accepted against it.
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        "INSERT INTO players (id, email, display_name, created_at) VALUES (?,?,?,?)",
+      )
+        .bind("plr_other", "other@example.com", "Other", now)
+        .run();
+      await env.DB.prepare(
+        "INSERT INTO memberships (campaign_id, player_id, character_id, character_name, joined_at) VALUES (?,?,?,?,?)",
+      )
+        .bind(CAMPAIGN, "plr_other", "chr_other", "Other", now)
+        .run();
+
+      const state = await deliver(
+        mime({
+          from: "other@example.com",
+          to: INBOX,
+          subject: `Re: [Test Hold #${CODE}] Tick 3`,
+          inReplyTo: `<${BOUND_MESSAGE_ID}>`,
+          body: "I act as Kestrel.",
+        }),
+        "other@example.com",
+      );
+      expect(state.rejected).toBe(true);
+      expect(state.reason).toMatch(/does not belong to you/i);
+    });
+  });
+
   describe("rejects what it should", () => {
     it("rejects mail to an address that is not the inbox", async () => {
       const state = await deliver(

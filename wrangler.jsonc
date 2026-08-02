@@ -50,7 +50,13 @@
     "MODEL_CHEAP": "claude-haiku-4-5",
     // Monthly per-campaign output-token budget. Exceeding it degrades
     // narration to templated sim prose; it never blocks a tick.
-    "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000"
+    "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000",
+
+    // Reserved mailbox on a second onboarded zone. Beats sent here come back
+    // through real Email Routing and are answered, which is what proves the
+    // inbound SMTP hop end to end. Deliberately a different zone from
+    // MAIL_DOMAIN so the loop crosses two independent Cloudflare zones.
+    "EMAIL_LOOPBACK_ADDRESS": "rpgloop@q-r.contact"
   }
 
   // Secrets (set via `wrangler secret put`, never committed):

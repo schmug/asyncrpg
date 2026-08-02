@@ -246,8 +246,13 @@ in D1. Exceeding either degrades narration quality — it never blocks play.
    core flow, touch-target and a11y audits, console-error gate, screenshots.
    **Service workers are blocked in the smoke context** — offline emulation does
    not reach SW-mediated fetches, so an outage drill would silently test nothing.
-4. **Email loopback E2E** — the Worker sends to its own subaddress and receives
-   it back through real Cloudflare delivery, proving the full inbound path.
+4. **Email round trip** — the game mails a beat to a reserved address on a
+   *second* onboarded zone; Cloudflare delivers it back to the Worker; the
+   Worker replies; Cloudflare delivers that to the Worker; the reply becomes a
+   turn. Two zones and two real deliveries, so no part of the mail path can be
+   broken without this failing. (Originally scoped as a same-domain
+   subaddress loop, which does not work: Cloudflare subaddressing is a
+   zone-wide setting, and a single zone would not exercise cross-zone routing.)
 5. **Sim soak** — 500 deterministic ticks, no LLM.
 
 A broken verification harness is a P0 defect, not an inconvenience.

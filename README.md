@@ -131,9 +131,19 @@ on two consecutive cycles.
 | `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
 | `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
 | `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
-| `scripts/email-e2e.mjs` | 15 checks on live mail configuration and real outbound delivery |
+| `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |
 
-`scripts/email-e2e.mjs` states plainly which hop it does **not** cover (the
-inbound SMTP delivery itself) rather than implying end-to-end proof it cannot
-provide; that path's logic is covered by
-`test/integration/email-handler.test.ts`.
+The email test is a genuine loop, not a simulation of one: the game mails a
+beat to a reserved address on a **second** onboarded zone, Cloudflare delivers
+it back to the Worker, the Worker replies, Cloudflare delivers *that* to the
+Worker, and the reply becomes a turn. Two zones, two real deliveries.
+
+It caught a bug nothing else could have. The inbound handler authenticated on
+the SMTP envelope sender — but Cloudflare rewrites that to
+`bounces@cf-bounce.<domain>` on mail it sends, so every legitimate reply was
+being rejected as an unregistered address. Identification now falls back to the
+header From, which is safe here specifically because Email Routing enforces
+SPF/DKIM/DMARC before the handler ever runs.
+
+Still not covered: deliverability to third-party mailboxes and their spam
+handling. That needs seed-list testing, not a self-test.

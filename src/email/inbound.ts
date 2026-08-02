@@ -13,6 +13,7 @@
 
 import PostalMime from "postal-mime";
 import type { Env } from "../env";
+import { handleLoopback, isLoopbackAddress } from "./loopback";
 import {
   codeFromSubject,
   isInboxAddress,
@@ -63,6 +64,8 @@ export async function handleInboundEmail(
   let subject = message.headers.get("subject");
   let inReplyTo = message.headers.get("in-reply-to");
   let references = message.headers.get("references");
+  let messageIdHeader = message.headers.get("message-id");
+  let headerFrom = message.headers.get("from");
 
   try {
     const raw = await new Response(message.raw).arrayBuffer();
@@ -71,8 +74,28 @@ export async function handleInboundEmail(
     subject = parsed.subject ?? subject;
     inReplyTo = parsed.inReplyTo ?? inReplyTo;
     references = parsed.references ?? references;
+    messageIdHeader = parsed.messageId ?? messageIdHeader;
+    headerFrom = parsed.from?.address ?? headerFrom;
   } catch {
     message.setReject("Could not read that message.");
+    return;
+  }
+
+  // Mail to the verification loopback is not a player action — it is a beat
+  // coming back to us, which the loopback records and answers.
+  if (isLoopbackAddress(env, message.to)) {
+    ctx.waitUntil(
+      handleLoopback(env, {
+        to: message.to,
+        from: message.from,
+        subject: subject ?? "",
+        messageId: messageIdHeader ?? "",
+        inReplyTo: inReplyTo ?? "",
+        body,
+        headerFrom: headerFrom ?? "",
+        campaignHeader: message.headers.get("x-asyncrpg-campaign"),
+      }).catch((err) => console.error("loopback failed", err)),
+    );
     return;
   }
 
@@ -85,13 +108,33 @@ export async function handleInboundEmail(
     return;
   }
 
-  // The envelope sender identifies the player. `message.from` is the SMTP MAIL
-  // FROM, which Email Routing authenticates; the header From can be spoofed and
-  // is deliberately never consulted.
-  const from = (message.from ?? "").toLowerCase();
-  const player = await env.DB.prepare("SELECT id, email FROM players WHERE email = ?")
-    .bind(from)
-    .first<{ id: string; email: string }>();
+  // Identify the sender.
+  //
+  // The envelope sender (SMTP MAIL FROM) is the primary signal, but it is not
+  // always the human: senders rewrite the return-path for bounce handling.
+  // Cloudflare Email Sending does exactly this — mail it sends arrives with
+  // `bounces@cf-bounce.<domain>` as the envelope sender — which the live
+  // round-trip test caught by having every legitimate reply rejected as an
+  // unregistered address. Mailing lists and forwarders rewrite it too.
+  //
+  // So: envelope sender first, then the header From. Falling back to the
+  // header is safe *here specifically* because Cloudflare Email Routing
+  // enforces SPF/DKIM/DMARC before a message ever reaches this handler, and
+  // DMARC is precisely an alignment check on the header From domain. A message
+  // that arrives claiming `From: someone@gmail.com` has already been proven to
+  // come from something Gmail authorises. Without that enforcement in front,
+  // this fallback would be spoofable and must not be used.
+  const candidates = [message.from, headerFrom]
+    .map((v) => (v ? (/<([^>]+)>/.exec(v)?.[1] ?? v).trim().toLowerCase() : null))
+    .filter((v): v is string => Boolean(v));
+
+  let player: { id: string; email: string } | null = null;
+  for (const candidate of candidates) {
+    player = await env.DB.prepare("SELECT id, email FROM players WHERE email = ?")
+      .bind(candidate)
+      .first<{ id: string; email: string }>();
+    if (player) break;
+  }
   if (!player) {
     message.setReject("This address is not registered to play.");
     return;
@@ -157,7 +200,7 @@ export async function handleInboundEmail(
     message.setReject("This reply does not belong to you.");
     return;
   }
-  if (binding && !sameAddress(message.from, sender.email)) {
+  if (binding && !sameAddress(message.from, sender.email) && !sameAddress(headerFrom, sender.email)) {
     message.setReject("Sender mismatch.");
     return;
   }

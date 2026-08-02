@@ -37,12 +37,12 @@ background and read `critic-reports/cycle-03.json`.
 
 | Command | Result |
 |---|---|
-| `npm test` | 179 passing |
+| `npm test` | 182 passing |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | invariants hold, replay identical, economy and state size bounded |
 | `node scripts/smoke.mjs <url>` | 67/67, mostly adversarial |
 | `node scripts/ui-smoke.mjs <url>` | 34/34, mobile viewport, SWs blocked |
-| `node scripts/email-e2e.mjs <url>` | 15/15 |
+| `node scripts/email-e2e.mjs <url>` | 22/22, including the real two-zone round trip |
 
 **Always deploy before running the critic.** Cycle 1 produced a false finding
 because the cloned repo and the live deployment were different revisions. The
@@ -82,14 +82,15 @@ list` so a skew is visible, but the fix is to not create one.
 
 Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
 
-1. **Inbound email E2E (blocker) — blocked on the user, likely permanently.**
-   Proving it needs a Cloudflare-verified mailbox this harness can read. The
-   only verified destination on the zone is the owner's real forwarding
-   address. `scripts/email-e2e.mjs` states the gap explicitly rather than
-   implying coverage; the handler's logic is covered by
-   `test/integration/email-handler.test.ts`. **Do not fake this green.** If the
-   user can provide a readable mailbox, wire it up; otherwise this finding will
-   recur every cycle and should be reported as an accepted boundary.
+1. ~~**Inbound email E2E (blocker)**~~ — **CLOSED.** The owner has four
+   onboarded zones, which made a real loop possible: the game mails a beat to
+   `rpgloop@q-r.contact`, Cloudflare delivers it back to the Worker, the
+   loopback replies to `rpg@cortech.online`, Cloudflare delivers that to the
+   Worker, and the reply becomes a turn. See `src/email/loopback.ts` and the
+   "inbound hop" section of `scripts/email-e2e.mjs`. It immediately found a
+   real bug: Cloudflare rewrites the SMTP envelope sender to
+   `bounces@cf-bounce.<domain>`, so authenticating on the envelope alone was
+   rejecting every legitimate reply.
 2. **Reply auth vs. the spec's HMAC token.** The spec called for an HMAC
    Reply-To token; the implementation uses `reply_bindings` keyed by
    Message-ID + subject code, because Cloudflare rejects a caller-set
@@ -121,7 +122,10 @@ Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
   scheme silently overwrote live entities once pruning could delete things.
 - **Cloudflare gotchas already paid for:** subdomains cannot be onboarded to
   Email Sending/Routing via API (Dashboard only), a caller-set `Message-ID` is
-  rejected, `output_config.effort` is rejected by Haiku 4.5, Sonnet 5 rejects
+  rejected, **the SMTP envelope sender is rewritten to
+  `bounces@cf-bounce.<domain>` on outbound mail** (so never authenticate on it
+  alone), `INSERT OR REPLACE` on a row other tables reference is a foreign-key
+  failure, `output_config.effort` is rejected by Haiku 4.5, Sonnet 5 rejects
   non-default `temperature`/`top_p`/`top_k`, and structured-output JSON Schema
   forbids `minimum`/`maximum`. Deploys take ~20–30s to propagate — testing
   immediately after `wrangler deploy` produced three separate false failures.
@@ -135,7 +139,7 @@ src/sim/       deterministic world model — pure, no I/O
   prng • types • invariants • names • genesis • drift • actions
   character • tick • downtime • prune • events
 src/dm/        narrate (Sonnet 5) • intent (Haiku 4.5) • fallback (no inference)
-src/email/     parse • inbound • outbound
+src/email/     parse • inbound • outbound • loopback (inbound-path proof)
 src/web/       chronicle (server-rendered, no-JS readable)
 src/           index (router) • campaign-do (the campaign) • auth • env
 public/        mobile PWA, no framework, no inline script

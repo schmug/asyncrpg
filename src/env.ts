@@ -13,6 +13,12 @@ export interface Env {
   // Secrets — absent in local dev and in CI. Every path degrades rather than
   // failing when these are unset.
   ANTHROPIC_API_KEY?: string;
+  /**
+   * Reserved mailbox on a second onboarded zone, used to prove the inbound
+   * SMTP hop end to end. Unset in normal operation, which makes the loopback
+   * entirely inert.
+   */
+  EMAIL_LOOPBACK_ADDRESS?: string;
   EMAIL_TOKEN_SECRET?: string;
   AUTH_TOKEN_SECRET?: string;
 }
