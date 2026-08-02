@@ -19,15 +19,25 @@ cycles**, cap 12 cycles. Check-ins: first deploy (done) and completion.
 |---|---|---|---|---|---|---|
 | 1 | 6 | 7 | 7 | 6 | 6 | fail |
 | 2 | 7 | 6 | 6 | 6 | 7 | fail |
-| 3 | — | — | — | — | — | **not yet run** |
+| 3 | 7 | 7 | 6 | 7 | 6 | fail |
+| 4 | — | — | — | — | — | running |
 
-Reports are committed in `critic-reports/`. Cycle 3's fixes are all landed and
-deployed; **the next action is to run cycle 3.**
+Reports are committed in `critic-reports/`. Every cycle-3 finding is landed,
+deployed, and verified live.
 
 ```bash
+npm run deploy                                                    # injects the revision
 node scripts/seed-demo.mjs https://play.cortech.online --ticks 6   # fresh prose to judge
-node scripts/critic.mjs 03
+node scripts/critic.mjs 04
 ```
+
+**Commit and deploy before running the critic.** This is not advice, it is the
+thing that cost cycle 3 a blocker: the gates and evidence commands in
+`scripts/critic.mjs` run in the *working tree*, while the critic reads a clean
+clone of HEAD. An unfinished test sitting uncommitted made `npm test` and
+`npm run typecheck` record failures for code the reviewer could not see, and it
+quite reasonably reported a red gate. The script now refuses to start on a
+dirty tree (`--allow-dirty` to override).
 
 The critic is `codex exec` (gpt-5.5) in a read-only sandbox against a clean
 clone plus a live-capture bundle. It takes 20–40 minutes; run it in the
@@ -37,75 +47,82 @@ background and read `critic-reports/cycle-03.json`.
 
 | Command | Result |
 |---|---|
-| `npm test` | 182 passing |
+| `npm test` | 226 passing |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | invariants hold, replay identical, economy and state size bounded |
-| `node scripts/smoke.mjs <url>` | 67/67, mostly adversarial |
+| `node scripts/smoke.mjs <url>` | 75/75, mostly adversarial |
 | `node scripts/ui-smoke.mjs <url>` | 34/34, mobile viewport, SWs blocked |
 | `node scripts/email-e2e.mjs <url>` | 22/22, including the real two-zone round trip |
 
-**Always deploy before running the critic.** Cycle 1 produced a false finding
-because the cloned repo and the live deployment were different revisions. The
-capture bundle now records `git status --porcelain` and `wrangler deployments
-list` so a skew is visible, but the fix is to not create one.
+Revision skew is now checkable rather than assumed: `/api/health` reports the
+`GIT_REVISION` injected by `npm run deploy`, smoke asserts it is a real SHA,
+and `gates.txt` prints `MATCH` or `SKEW` against the revision under review.
+Cycle 1's false finding came from a skew nobody could see.
 
-## What cycle 3 addressed (landed, unjudged)
+Note that `scripts/smoke.mjs` proves the sign-in rate limiter works by
+exhausting it, and the limiter keys on IP. It now waits for the window to roll
+over before exiting — without that, `ui-smoke` runs next, gets a 429 on
+sign-in, and reports it as a console error.
 
-- **Cost controls** — input *and* output tokens metered (input was unmetered
-  and is the larger share); global kill switch in `settings.inference_enabled`
-  so spend can be stopped without a deploy; rate limits on sign-in and actions.
-- **Projection durability** — D1 failures are recorded in `projection_failures`
-  instead of swallowed, surfaced to the host as `chronicleNeedsRepair`, and
-  cleared by the existing host-only `/reproject`.
-- **Blocked ticks** — a tick that fails invariants now writes a beat saying so,
-  rather than advancing nothing silently.
-- **App surface** — the latest beat and a real character sheet (attributes,
-  skills, tendencies, conditions, named bonds) now render in-app. Previously
-  you had to leave for the chronicle to find out what happened.
-- **Economy rebalance (the big one).** The demo world had every settlement at
-  prosperity 100 with 200k–500k population (they start at 200–9,000), and every
-  living faction at power *and* treasury 100. Population growth was unbounded
-  compounding and prosperity had no equilibrium. Now: logistic growth against a
-  carrying capacity, prosperity mean-reverting toward a sustainable target with
-  a floor that does not depend on the ruling faction (the three variables are
-  circularly coupled and spiral *down* as readily as up), and faction upkeep
-  scaling with power and holdings. Guarded by new soak assertions.
-- **Absence heals.** The 1500-tick soak caught a real promise violation:
-  conditions are cleared by *acting*, so a player who stopped while wounded
-  stayed wounded forever. Offscreen characters now shed conditions over time.
-  The soak measures the promise from the tick a player goes quiet rather than
-  against an absolute floor.
-- **Dossier** — dead NPCs no longer flood the "People" grid (26 of 28 cards
-  were dead); the notable dead get a capped "Remembered" section.
+## What cycle 4 addressed (landed, deployed, verified live)
 
-## Outstanding findings from cycle 2
+Cycle 3 scored 7/7/6/7/6 with 10 required fixes. All ten are done.
 
-Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
+- **The first blocker was a process error, not a product defect.** An
+  unfinished test was uncommitted while the critic captured evidence. See the
+  warning above; `scripts/critic.mjs` now refuses to run on a dirty tree.
+- **Build provenance.** `/api/health` reports the revision, injected at deploy
+  time. Smoke asserts it; `gates.txt` reports MATCH or SKEW.
+- **Markdown fences in canon.** Four live beats ended in a bare ``` — the model
+  closing a fence it opened outside the JSON string. Prose is now normalized
+  before validation. Stripped rather than rejected: the writing around the
+  stray fence was sound, and falling back to templated prose over three
+  backticks trades a good beat for a worse one.
+- **Blocked ticks could loop forever.** Clearing pending fixes a violation
+  caused by player input, but not one caused by deterministic drift. After
+  three consecutive rejections the campaign halts explicitly and offers
+  `resume()`. The policy is a pure function, `blockedTickPolicy`, because
+  "does not loop forever" is otherwise only observable by waiting forever.
+- **Absence was mechanically safe but socially unequal.** Renown and bonds
+  accrue only by acting, so a returning player resumed behind.
+  `restoreStanding()` lifts them to the party *median* on return — never past
+  it. Absence is not rewarded; it just stops costing.
+- **Reply auth now is the capability the spec called for.** An HMAC over
+  (campaign, player, tick), verified before a binding is honored. It rides the
+  subject line, not a plus-addressed `Reply-To`, because Email Routing matches
+  exact addresses and the apex catch-all belongs to another Worker. Both the
+  reasoning and the two accepted weakenings are in the spec and
+  `src/email/token.ts`. `EMAIL_TOKEN_SECRET` is set in production.
+- **Delivery failures are rows**, in `delivery_failures` (migration 0005),
+  surfaced to the player they were owed to rather than only logged.
+- **Header drift is gated.** Known zone overrides pass loudly; undocumented
+  drift fails the suite. `docs/DEPLOYMENT.md` names what is the owner's.
+- **The chronicle reads as a chronicle.** A "So far" orientation, and turns
+  grouped into chapters named for what happened in them — with a kind-aware
+  bar, because a routine action that rolls a critical success scores about the
+  same as a settlement changing hands, and there is one of those most turns.
+- **Narrative tics.** The tendency pool was too small to avoid collisions: a
+  hedge-doctor and a marsh guide were both "unable to leave a locked door
+  alone", and the narrator repeated it for both every turn. And one phrasing
+  per outcome made six critical successes on one page read identically.
+- **First-run orientation** in-app; README no longer describes a model-delta
+  validation path that does not exist.
 
-1. ~~**Inbound email E2E (blocker)**~~ — **CLOSED.** The owner has four
-   onboarded zones, which made a real loop possible: the game mails a beat to
-   `rpgloop@q-r.contact`, Cloudflare delivers it back to the Worker, the
-   loopback replies to `rpg@cortech.online`, Cloudflare delivers that to the
-   Worker, and the reply becomes a turn. See `src/email/loopback.ts` and the
-   "inbound hop" section of `scripts/email-e2e.mjs`. It immediately found a
-   real bug: Cloudflare rewrites the SMTP envelope sender to
-   `bounces@cf-bounce.<domain>`, so authenticating on the envelope alone was
-   rejecting every legitimate reply.
-2. **Reply auth vs. the spec's HMAC token.** The spec called for an HMAC
-   Reply-To token; the implementation uses `reply_bindings` keyed by
-   Message-ID + subject code, because Cloudflare rejects a caller-set
-   `Message-ID` and RFC 5321 caps the local part at 64 octets. The reasoning is
-   in `migrations/0001_init.sql` and `src/email/parse.ts`. Either argue the
-   replacement meets the same bar with evidence, or update the spec — but the
-   critic will keep raising it while the two disagree.
-3. **HSTS mismatch — user's zone.** The app sends `max-age=31536000`;
-   production serves `max-age=0` because the `cortech.online` zone overrides
-   it. Same story with Cloudflare Analytics auto-injection, which forced one
-   extra CSP host. Both are the domain owner's call.
-4. **"Months-quality" simulation.** Partly addressed by the economy rebalance,
-   but the critic wants multi-campaign captures that read like memorable
-   campaigns. Consider seeding two or three demo worlds with different seeds
-   and including all of them in the bundle.
+## Boundaries that are not the app's to fix
+
+1. **HSTS.** The app sends `max-age=31536000`; the zone serves
+   `max-age=0; includeSubDomains; preload`. Enabling it commits every
+   subdomain of `cortech.online` to HTTPS-only for the max-age window and
+   cannot be quickly undone. Owner's call — see `docs/DEPLOYMENT.md`.
+2. **Cloudflare Analytics auto-injection**, which forced two Cloudflare hosts
+   into an otherwise strict CSP. Owner's call.
+3. **Third-party mailbox deliverability.** Gmail/Outlook spam placement cannot
+   be self-tested. What is tested instead: the full two-zone round trip through
+   real Email Routing, and SPF/DMARC/MX assertions in the smoke suite.
+4. **"Months-quality" simulation.** Improved by chapters and the "So far"
+   summary, but the critic has asked twice for multi-campaign captures. Seeding
+   two or three demo worlds with different seeds into the bundle is the
+   remaining move.
 
 ## Things worth knowing before you change anything
 
@@ -113,10 +130,11 @@ Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
   web app; quorum-or-deadline ticks; simulation is canon and the model narrates;
   graduated absence with no penalty; downtime, in-character letters, and solo
   journals; private beta, no public signup or billing.
-- **The no-penalty promise is stated precisely** in `docs/specs/...#5` and the
-  README. Absence costs nothing; engagement earns story presence, not power.
-  The critic reads any differential as a penalty — the honest answer is the
-  precise wording, not removing the depth features the user asked for.
+- **The no-penalty promise is stated precisely** in `docs/specs/...#5`, the
+  README, and now the sign-in screen. Absence costs nothing; engagement earns
+  story presence, not power. The critic read the social gap as a penalty twice,
+  which was fair — `restoreStanding()` closes it rather than arguing about it.
+  Do not close it by removing the depth features the user asked for.
 - **Determinism is load-bearing.** No `Math.random()` anywhere in `src/sim`.
   Entity ids are positional on `(tick, sequence)`; a previous size-derived
   scheme silently overwrote live entities once pruning could delete things.

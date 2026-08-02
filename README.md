@@ -142,10 +142,10 @@ on two consecutive cycles.
 
 | Gate | What it proves |
 |---|---|
-| `npm test` | 167 tests, including the absence promise and the world invariants |
+| `npm test` | 226 tests, including the absence promise and the world invariants |
 | `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
-| `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
-| `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
+| `scripts/smoke.mjs` | 75 checks against production, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 34 checks driving the real app at a mobile viewport, service workers blocked |
 | `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |
 
 The email test is a genuine loop, not a simulation of one: the game mails a
