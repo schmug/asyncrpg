@@ -61,6 +61,9 @@ $("signin-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({ email }),
     });
     say(out.message, "ok");
+    // Email is the only way in, so "it never arrived" is a dead end unless we
+    // say what to do about it here, at the moment it starts not arriving.
+    $("signin-help").hidden = false;
   } catch (err) {
     say(err.message, "err");
   } finally {

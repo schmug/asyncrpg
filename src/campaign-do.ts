@@ -363,8 +363,27 @@ export class CampaignDO extends DurableObject<Env> {
     }));
 
     if (isQuorumMet(world, stubs, this.#config())) {
-      await this.resolveTick("quorum");
-      return { accepted: true, resolvedNow: true };
+      // The action is already durably in `pending`. Resolving the tick is
+      // everything that comes *after* accepting it — narration, mail, D1
+      // projection — and all of that depends on services that can be slow or
+      // briefly unavailable. Letting a failure there propagate turns an
+      // accepted turn into a 500 and loses the player's writing, which is the
+      // worst possible trade: the expensive, irreplaceable part already
+      // succeeded.
+      //
+      // So: accept, and let the alarm resolve. The tick is late, not lost.
+      try {
+        await this.resolveTick("quorum");
+        return { accepted: true, resolvedNow: true };
+      } catch (err) {
+        console.error(
+          `inline resolve failed for ${world.campaignId} at tick ${world.tick}; ` +
+            `action is stored and the alarm will retry:`,
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+        await this.#scheduleNextTick();
+        return { accepted: true, resolvedNow: false };
+      }
     }
     return { accepted: true, resolvedNow: false };
   }

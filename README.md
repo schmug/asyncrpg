@@ -144,6 +144,7 @@ on two consecutive cycles.
 |---|---|
 | `npm test` | 226 tests, including the absence promise and the world invariants |
 | `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
+| `npm run sim:endurance` | 4 players over 60 ticks — quorum and deadline resolution, absences of 1/3/30 turns, re-entry recaps, and the no-penalty promise asserted every turn |
 | `scripts/smoke.mjs` | 75 checks against production, most of them adversarial |
 | `scripts/ui-smoke.mjs` | 34 checks driving the real app at a mobile viewport, service workers blocked |
 | `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |

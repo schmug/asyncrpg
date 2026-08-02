@@ -13,7 +13,8 @@
     "sim:soak": "tsx scripts/sim-soak.ts",
     "smoke": "node scripts/smoke.mjs",
     "ui-smoke": "node scripts/ui-smoke.mjs",
-    "critic": "node scripts/critic.mjs"
+    "critic": "node scripts/critic.mjs",
+    "sim:endurance": "tsx scripts/endurance.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.1",

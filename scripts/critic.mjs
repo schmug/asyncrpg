@@ -37,6 +37,7 @@ const EVIDENCE = [
   { cmd: "node", args: ["scripts/ui-smoke.mjs", BASE], file: "ui-smoke-output.txt" },
   { cmd: "node", args: ["scripts/email-e2e.mjs", BASE], file: "email-e2e-output.txt" },
   { cmd: "npx", args: ["tsx", "scripts/sim-soak.ts", "--ticks", "1000"], file: "sim-soak-output.txt" },
+  { cmd: "npx", args: ["tsx", "scripts/endurance.ts", "--ticks", "60"], file: "endurance-output.txt" },
   { cmd: "node", args: ["scripts/dump-narration.mjs", BASE, DEMO_SLUG], file: "generated-narration.txt" },
 ];
 const COPY_DIRS = ["critic-reports/ui"];
