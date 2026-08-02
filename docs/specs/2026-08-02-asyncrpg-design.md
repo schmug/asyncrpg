@@ -135,17 +135,33 @@ no level, no XP, and no gear treadmill to fall behind on. A player who joins at
 tick 200 starts from the same spread as one who joined at tick 1.
 
 **Not guaranteed, and deliberately so.** A player who plays more accrues more
-*story presence* — more entries in the chronicle, warmer relationships with
-NPCs, a wider reputation. That is the point of the depth features, which were
-requested precisely so that people who want to do more can. Renown feeds
-difficulty, so a well-known character faces different situations, not easier
-ones; and it is shown as a phrase rather than a score so it does not read as a
-leaderboard.
+*story presence* — more entries in the chronicle, more of the telling spent on
+them. That is the point of the depth features, which were requested precisely
+so that people who want to do more can.
+
+**What this used to say, and why it was wrong.** An earlier version of this
+section claimed the extra was "warmer relationships with NPCs, a wider
+reputation". A later review pointed out that both of those are *mechanical*:
+renown and NPC attitudes are inputs to `difficultyFor`. So optional downtime
+was buying a real edge, which makes skipping it a real cost — the promise
+inverted, in slower motion. Worse, `restoreStanding` lifts a returning player's
+renown and bonds but cannot touch the NPC's reciprocal attitude, so the gap
+from a missed month of networking was permanent.
+
+`train` and `network` therefore no longer change any mechanically relevant
+field. They record who you trained with and who you spent time with, the
+narrator is told, and it shows up in the chronicle. `research` still reveals
+threats — that is information the whole table receives, not a personal bonus —
+and `recover` still clears conditions, which removes a minus rather than adding
+a plus. `test/sim/downtime.test.ts` asserts the general form: no downtime
+activity of any kind moves attributes, skills, renown, bonds, or NPC attitudes.
 
 The distinction is between *penalty* and *difference*. Being away costs you
-nothing. Being present earns you a place in the story. A design where those two
-were identical would have nothing for the engaged player to do, which was an
-explicit requirement.
+nothing, and neither does skipping the optional parts. Being present earns you
+a place in the story and nothing else. A design where presence and absence were
+completely identical would have nothing for the engaged player to do, which was
+an explicit requirement — the answer is that what they get is narrative, and
+narrative is not a stat.
 
 
 There is also **no XP ladder to fall behind on.** Advancement is reputation and

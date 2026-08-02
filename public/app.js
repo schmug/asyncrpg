@@ -143,7 +143,10 @@ function renderCampaign(data) {
   const c = data.campaign;
   currentSlug = c.slug;
   $("c-title").textContent = c.name;
-  $("c-where").textContent = `${c.place} — ${c.season} of year ${c.year}. ${c.situation}`;
+  // The situation already opens with the place and the season, so prefixing it
+  // with both again read as "Krauyaest — summer of year 81. Krauyaest in the
+  // summer of year 81. ..." on the live page.
+  $("c-where").textContent = c.situation;
 
   const clock = $("c-clock");
   clock.textContent = "";

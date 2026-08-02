@@ -102,10 +102,26 @@ function factSheet(
     state.regions[state.scene.regionId]?.name ??
     "the road";
 
+  // A character's tendencies are handed to the narrator sparingly, and only
+  // one at a time. Supplying all of them every turn is what made a 25-turn
+  // chronicle read pattern-bound: told every turn that Bram "gives away more
+  // than he can spare", the model dutifully wrote it every turn, until the
+  // motif stopped being characterisation and became a tic. Rotating on the
+  // tick — deterministically, so replay is unchanged — means a trait recurs
+  // often enough to be recognisable and rarely enough to still land.
   const cast = Object.values(state.characters)
     .filter((c) => c.presence !== "offscreen")
-    .map((c) => `- ${c.name} (${c.concept})${c.presence === "drifting" ? " [away]" : ""}` +
-      (c.conditions.length ? ` — ${c.conditions.join(", ")}` : ""))
+    .map((c) => {
+      const trait =
+        c.tendencies.length > 0 && state.tick % 3 === 0
+          ? ` — ${c.tendencies[state.tick % c.tendencies.length]}`
+          : "";
+      return (
+        `- ${c.name} (${c.concept})${c.presence === "drifting" ? " [away]" : ""}` +
+        trait +
+        (c.conditions.length ? ` — ${c.conditions.join(", ")}` : "")
+      );
+    })
     .join("\n");
 
   const world = events

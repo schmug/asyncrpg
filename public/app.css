@@ -222,6 +222,14 @@ summary {
   min-height: 44px;
   display: flex;
   align-items: center;
+  /* A disclosure control is a button, not prose. Without this, tapping one
+     selects its label, and the browser's blue selection band sat across
+     "Your character" in every captured screenshot — a jarring mismatch
+     against the whole warm palette, and an artifact of the tap rather than
+     anything the page meant to show. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .chronlink { display: inline-block; margin-top: 1.5rem; color: var(--accent); min-height: 44px; }

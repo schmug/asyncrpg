@@ -112,6 +112,9 @@ writeFileSync(
     `captured at: (see timings.json)`,
     `\n$ npm run typecheck\n${tryRun("npm", ["run", "typecheck"])}`,
     `\n$ npm test\n${tryRun("npm", ["test"])}`,
+    // Dependency posture is part of the security story and was invisible in
+    // the bundle: a reviewer could see the code but not what it pulls in.
+    `\n$ npm audit --omit=dev\n${tryRun("npm", ["audit", "--omit=dev"], 120_000)}`,
     `\n$ gh run list (GitHub Actions CI)\n${tryRun("gh", ["run", "list", "--limit", "10"])}`,
     `\n$ git log --oneline -20\n${tryRun("git", ["log", "--oneline", "-20"])}`,
     // Cycle 1 produced a false finding because the cloned repo and the live

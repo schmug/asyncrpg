@@ -448,6 +448,30 @@ export class CampaignDO extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     await this.resolveTick("deadline");
+    // Heal a lagging chronicle without waiting for a host to notice the
+    // banner. Projection failures were already visible and repairable by hand;
+    // "visible" is the right shape but it still leaves the public artifact
+    // wrong for as long as nobody looks. Runs after the tick so a repair can
+    // never delay canon, and swallows its own errors for the same reason —
+    // the next alarm will try again.
+    await this.#healProjection();
+  }
+
+  async #healProjection(): Promise<void> {
+    try {
+      const world = this.#get<WorldState>("world");
+      if (!world) return;
+      const open = await this.env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM projection_failures WHERE campaign_id = ? AND resolved_at IS NULL",
+      )
+        .bind(world.campaignId)
+        .first<{ n: number }>();
+      if ((open?.n ?? 0) === 0) return;
+      await this.reproject();
+      console.log(`chronicle reprojected automatically for ${world.campaignId}`);
+    } catch (err) {
+      console.error("automatic reprojection failed; will retry next alarm", err);
+    }
   }
 
   // ─── the tick ──────────────────────────────────────────────────────────
