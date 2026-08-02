@@ -9,13 +9,15 @@
  */
 
 import { DurableObject } from "cloudflare:workers";
-import { joinCharacter } from "./sim/character";
+import { joinCharacter, renownLabel } from "./sim/character";
 import { generateWorld } from "./sim/genesis";
 import { assertWorldInvariants, checkWorldInvariants } from "./sim/invariants";
 import { seedFrom } from "./sim/prng";
 import { CADENCE_MS, DEFAULT_CAMPAIGN_CONFIG, isQuorumMet, quorumSize, runTick } from "./sim/tick";
 import type { CampaignConfig, Cadence } from "./sim/tick";
 import { pruneWorld } from "./sim/prune";
+import { EventLog } from "./sim/events";
+import { isDowntimeKind, resolveDowntime } from "./sim/downtime";
 import { narrateBeat } from "./dm/narrate";
 import { parseIntent } from "./dm/intent";
 import { promptFor } from "./dm/fallback";
@@ -81,7 +83,8 @@ export interface CampaignSnapshot {
     name: string;
     concept: string;
     presence: string;
-    renown: number;
+    /** Qualitative standing. The raw number is deliberately not exposed. */
+    standing: string;
     conditions: string[];
     hasPending: boolean;
   }[];
@@ -281,6 +284,56 @@ export class CampaignDO extends DurableObject<Env> {
     return { accepted: true, resolvedNow: false };
   }
 
+  /**
+   * Resolve a downtime action immediately, between ticks.
+   *
+   * Deliberately not queued into the tick: downtime is for people who want to
+   * do more *now*, and making them wait for the group's clock would defeat
+   * the point. It also cannot change attributes or skills, so resolving it
+   * out of band cannot advantage anyone — see src/sim/downtime.ts.
+   */
+  async submitDowntime(
+    playerId: string,
+    kind: string,
+    detail: string,
+    targetId: string | null,
+  ): Promise<{ ok: boolean; outcome?: string; reason?: string }> {
+    const world = this.#get<WorldState>("world");
+    if (!world) return { ok: false, reason: "campaign not initialised" };
+    if (!isDowntimeKind(kind)) return { ok: false, reason: "unknown downtime activity" };
+
+    const character = Object.values(world.characters).find((c) => c.playerId === playerId);
+    if (!character) return { ok: false, reason: "not a member" };
+
+    const log = new EventLog(world.tick);
+    const result = resolveDowntime(
+      world,
+      { characterId: character.id, kind, detail, targetId },
+      log,
+    );
+    if (!result.ok) return { ok: false, reason: result.reason };
+
+    const violations = checkWorldInvariants(world);
+    if (violations.length > 0) {
+      return { ok: false, reason: "that would have broken the world" };
+    }
+
+    this.#put("world", world);
+    this.ctx.waitUntil(
+      (async () => {
+        await this.#writeEvents(world.campaignId, result.events);
+        await this.#writeEntities(world);
+      })().catch((err) => console.error("downtime projection failed", err)),
+    );
+    return { ok: true, outcome: result.outcome };
+  }
+
+  /** Recent player-authored side material, folded into the next beat. */
+  async recordSideMaterial(kind: "letter" | "journal", summary: string): Promise<void> {
+    const recent = this.#get<string[]>("side") ?? [];
+    this.#put("side", [...recent, `${kind}: ${summary}`].slice(-12));
+  }
+
   #pending(): PendingRow[] {
     return this.ctx.storage.sql
       .exec<PendingRow>("SELECT player_id, raw_text, via, submitted_at FROM pending")
@@ -335,14 +388,47 @@ export class CampaignDO extends DurableObject<Env> {
     // campaign playable instead of wedged.
     const violations = checkWorldInvariants(result.state);
     if (violations.length > 0) {
+      // Roll back, but do NOT throw. A deterministic invariant failure would
+      // otherwise reproduce on every alarm forever: same state, same pending
+      // actions, same crash — a campaign wedged with no way out. Clearing the
+      // pending queue changes the inputs, so the next tick is a different
+      // computation, and rescheduling keeps the clock alive.
+      console.error(
+        `tick ${before.tick + 1} rejected for campaign ${before.campaignId}:`,
+        violations.slice(0, 5).join("; "),
+      );
       this.#put("world", before);
-      throw new Error(`tick ${before.tick + 1} rejected: ${violations.slice(0, 5).join("; ")}`);
+      this.ctx.storage.sql.exec("DELETE FROM pending");
+      await this.#scheduleNextTick();
+      return {
+        tick: before.tick,
+        source: "blocked",
+        eventCount: 0,
+        drifted: [],
+        reason,
+      };
     }
 
     pruneWorld(result.state);
 
-    const beat = await narrateBeat(dm, result.state, result.events, result.resolutions, this.#budget());
-    result.state.scene.situation = beat.situation || result.state.scene.situation;
+    // Letters and journals players wrote between ticks become facts the
+    // narrator can weave in, so side material affects the shared story
+    // instead of sitting in a drawer.
+    const side = this.#get<string[]>("side") ?? [];
+    const beat = await narrateBeat(
+      dm,
+      result.state,
+      result.events,
+      result.resolutions,
+      this.#budget(),
+      side,
+    );
+    if (side.length > 0) this.#put("side", []);
+    // Deliberately NOT written back into world state. `beat.situation` is model
+    // output; the canonical scene line is produced deterministically by
+    // `describeScene` during drift. Persisting the model's version here would
+    // let it steer every subsequent tick, which is exactly the state authority
+    // this design denies it.
 
     this.#put("world", result.state);
     this.#put("history", [...history, ...result.events].slice(-400));
@@ -554,7 +640,7 @@ export class CampaignDO extends DurableObject<Env> {
         name: c.name,
         concept: c.concept,
         presence: c.presence,
-        renown: Math.round(c.renown),
+        standing: renownLabel(c.renown),
         conditions: c.conditions,
         hasPending: pendingIds.has(c.playerId),
       })),
@@ -566,6 +652,31 @@ export class CampaignDO extends DurableObject<Env> {
     const world = this.#world();
     const character = Object.values(world.characters).find((c) => c.playerId === playerId);
     return character ? promptFor(character, world) : null;
+  }
+
+  /**
+   * Rebuild the D1 read model from canonical DO state.
+   *
+   * Projection writes are swallowed so a D1 blip cannot wedge a tick, which
+   * means the public chronicle can silently drift from the truth. This is the
+   * repair path: the DO holds canon, so entities and the recent event history
+   * can always be replayed onto D1. Without it, "recoverable" was a claim with
+   * no mechanism behind it.
+   */
+  async reproject(): Promise<{ entities: number; events: number }> {
+    const world = this.#get<WorldState>("world");
+    if (!world) return { entities: 0, events: 0 };
+    const history = this.#get<WorldEvent[]>("history") ?? [];
+    await this.#writeEntities(world);
+    await this.#writeEvents(world.campaignId, history);
+    try {
+      await this.env.DB.prepare("UPDATE campaigns SET tick = ? WHERE id = ?")
+        .bind(world.tick, world.campaignId)
+        .run();
+    } catch {
+      /* the tick mirror is cosmetic */
+    }
+    return { entities: Object.keys(world.characters).length + Object.keys(world.npcs).length, events: history.length };
   }
 
   /** Full canonical world — used by the adversarial smoke suite and by tests. */

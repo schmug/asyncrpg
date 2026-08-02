@@ -6,6 +6,7 @@
  * either player-authored or model-authored, so everything is escaped.
  */
 
+import { renownLabel } from "../sim/character";
 import { escapeHtml } from "../email/outbound";
 import type { Env } from "../env";
 
@@ -82,15 +83,19 @@ const KIND_LABEL: Record<string, string> = {
 };
 
 export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<Response> {
-  const [beats, events, entities] = await Promise.all([
+  const [beats, events, entities, journals, letters, history] = await Promise.all([
     env.DB.prepare(
       "SELECT tick, prose, source, created_at FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 25",
     )
       .bind(campaign.id)
       .all<BeatRow>(),
+    // Tick 0 is the generated pre-play history — decades of it. Mixed into the
+    // live timeline it drowns everything the group actually did, which is the
+    // opposite of what a chronicle is for. Queried and rendered separately.
     env.DB.prepare(
       `SELECT tick, kind, summary, significance FROM events
-       WHERE campaign_id = ? AND significance >= 55 ORDER BY tick DESC, significance DESC LIMIT 60`,
+       WHERE campaign_id = ? AND tick > 0 AND significance >= 55
+       ORDER BY tick DESC, significance DESC LIMIT 60`,
     )
       .bind(campaign.id)
       .all<EventRow>(),
@@ -99,6 +104,32 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     )
       .bind(campaign.id)
       .all<EntityRow>(),
+    env.DB.prepare(
+      `SELECT j.tick, j.title, j.body, COALESCE(e.name, 'Someone') AS who
+       FROM journals j LEFT JOIN entities e
+         ON e.campaign_id = j.campaign_id AND e.entity_id = j.character_id
+       WHERE j.campaign_id = ? ORDER BY j.tick DESC, j.rowid DESC LIMIT 20`,
+    )
+      .bind(campaign.id)
+      .all<{ tick: number; title: string; body: string; who: string }>(),
+    env.DB.prepare(
+      `SELECT l.tick, l.body,
+              COALESCE(f.name, 'Someone') AS sender,
+              COALESCE(t.name, 'someone') AS recipient
+       FROM letters l
+       LEFT JOIN entities f ON f.campaign_id = l.campaign_id AND f.entity_id = l.from_character
+       LEFT JOIN entities t ON t.campaign_id = l.campaign_id AND t.entity_id = l.to_character
+       WHERE l.campaign_id = ? ORDER BY l.tick DESC, l.rowid DESC LIMIT 20`,
+    )
+      .bind(campaign.id)
+      .all<{ tick: number; body: string; sender: string; recipient: string }>(),
+    env.DB.prepare(
+      `SELECT tick, kind, summary, significance FROM events
+       WHERE campaign_id = ? AND tick = 0 AND significance >= 70
+       ORDER BY significance DESC LIMIT 12`,
+    )
+      .bind(campaign.id)
+      .all<EventRow>(),
   ]);
 
   const beatRows = beats.results ?? [];
@@ -131,7 +162,16 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
         )
         .join("") +
       `</ol>`
-    : `<p class="empty">No turning points recorded yet.</p>`;
+    : `<p class="empty">No turning points yet — the story is still young.</p>`;
+
+  const historyRows = history.results ?? [];
+  const historyHtml = historyRows.length
+    ? `<h2>Before you arrived</h2>` +
+      `<p class="empty">Generated history. None of the party was there for any of it.</p>` +
+      `<ol class="tl">` +
+      historyRows.map((e) => `<li><span class="n">—</span>${escapeHtml(e.summary)}</li>`).join("") +
+      `</ol>`
+    : "";
 
   const byKind = new Map<string, EntityRow[]>();
   for (const e of entityRows) {
@@ -163,6 +203,42 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     })
     .join("");
 
+  // Side material earns a place in the artifact — writing a private scene that
+  // nobody can ever read back would make the feature pointless.
+  const journalRows = journals.results ?? [];
+  const journalHtml = journalRows.length
+    ? `<h2>Private scenes</h2>` +
+      journalRows
+        .map(
+          (j) =>
+            `<article class="beat"><p class="t">${escapeHtml(j.who)} · tick ${j.tick}` +
+            (j.title ? ` <span class="tag">${escapeHtml(j.title)}</span>` : "") +
+            `</p>` +
+            j.body
+              .split(/\n{2,}/)
+              .map((p) => `<p>${escapeHtml(p)}</p>`)
+              .join("") +
+            `</article>`,
+        )
+        .join("")
+    : "";
+
+  const letterRows = letters.results ?? [];
+  const letterHtml = letterRows.length
+    ? `<h2>Correspondence</h2>` +
+      letterRows
+        .map(
+          (l) =>
+            `<article class="beat"><p class="t">${escapeHtml(l.sender)} to ${escapeHtml(l.recipient)} · tick ${l.tick}</p>` +
+            l.body
+              .split(/\n{2,}/)
+              .map((p) => `<p>${escapeHtml(p)}</p>`)
+              .join("") +
+            `</article>`,
+        )
+        .join("")
+    : "";
+
   const title = `${campaign.name} — chronicle`;
   const html =
     `<!doctype html><html lang="en"><head><meta charset="utf-8">` +
@@ -175,6 +251,9 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     `<p class="sub">A chronicle in ${beatRows.length} recorded turn${beatRows.length === 1 ? "" : "s"}.</p></header>` +
     `<h2>Turns</h2>${beatHtml}` +
     `<h2>Turning points</h2>${timelineHtml}` +
+    journalHtml +
+    letterHtml +
+    historyHtml +
     dossiers +
     `<footer>Generated by a simulation, narrated as it went. ` +
     `<a href="/">asyncrpg</a></footer>` +
@@ -192,7 +271,7 @@ function describe(kind: string, d: Record<string, unknown>): string {
   const n = (k: string): number => (typeof d[k] === "number" ? Math.round(d[k] as number) : 0);
   switch (kind) {
     case "character":
-      return `${String(d.concept ?? "")} · renown ${n("renown")}${
+      return `${String(d.concept ?? "")} · ${renownLabel(n("renown"))}${
         Array.isArray(d.conditions) && d.conditions.length ? ` · ${(d.conditions as string[]).join(", ")}` : ""
       }${d.presence === "offscreen" ? " · away" : d.presence === "drifting" ? " · drifting" : ""}`;
     case "faction":
@@ -200,7 +279,7 @@ function describe(kind: string, d: Record<string, unknown>): string {
         ? "broken and scattered"
         : `${String(d.kind ?? "").replace(/_/g, " ")} · power ${n("power")} · treasury ${n("treasury")}`;
     case "npc":
-      return `${String(d.role ?? "")}${d.alive === false ? " · dead" : ""} · known ${n("renown")}`;
+      return `${String(d.role ?? "")}${d.alive === false ? " · dead" : ""} · ${renownLabel(n("renown"))}`;
     case "settlement":
       return d.razed
         ? "abandoned"

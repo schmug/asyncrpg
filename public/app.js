@@ -6,7 +6,7 @@
 // innerHTML — the DM's prose is untrusted content.
 
 const $ = (id) => document.getElementById(id);
-const views = ["view-signin", "view-home", "view-campaign"];
+const views = ["view-signin", "view-home", "view-invite", "view-campaign"];
 
 function show(id) {
   for (const v of views) $(v).hidden = v !== id;
@@ -174,12 +174,27 @@ function renderCampaign(data) {
     const meta = document.createElement("p");
     meta.className = "meta";
     meta.textContent =
-      `${m.concept} · known ${m.renown}/100` +
+      `${m.concept} · ${m.standing}` +
       (m.conditions.length ? ` · ${m.conditions.join(", ")}` : "") +
       (m.hasPending ? " · turn submitted" : "");
     li.append(name, pill, meta);
     cast.append(li);
   }
+
+  // Letters go to other players, so the recipient list is everyone but you.
+  const to = $("letter-to");
+  to.textContent = "";
+  for (const m of c.cast) {
+    if (m.characterId === `chr_${data.playerId}`) continue;
+    const option = document.createElement("option");
+    option.value = m.characterId;
+    option.textContent = m.name;
+    to.append(option);
+  }
+  $("letter-details").hidden = to.options.length === 0;
+
+  // Only the host can invite, so only the host is offered it.
+  $("invite-box").hidden = !data.isHost;
 
   $("c-chronicle").href = `/c/${encodeURIComponent(c.slug)}`;
   show("view-campaign");
@@ -214,6 +229,125 @@ $("back").addEventListener("click", () => {
   location.hash = "";
 });
 
+// ─── invitations ───────────────────────────────────────────────────────────
+
+$("invite-btn").addEventListener("click", async () => {
+  const button = $("invite-btn");
+  button.disabled = true;
+  try {
+    const out = await api(`/api/campaigns/${encodeURIComponent(currentSlug)}/invite`, {
+      method: "POST",
+    });
+    const field = $("invite-url");
+    field.value = out.url;
+    field.hidden = false;
+    $("invite-url-label").hidden = false;
+    field.focus();
+    field.select();
+    $("invite-hint").textContent =
+      `Send this link to your group. It works for up to 12 people and expires in ${out.expiresInDays} days.`;
+    say("Invite link ready — copy it from the box below.", "ok");
+  } catch (err) {
+    say(err.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+let inviteToken = null;
+
+async function showInvite(token) {
+  inviteToken = token;
+  try {
+    const out = await api(`/api/invite/${encodeURIComponent(token)}`);
+    $("invite-campaign").textContent = `${out.campaign} is waiting for you.`;
+    show("view-invite");
+  } catch (err) {
+    say(err.message, "err");
+    show("view-home");
+  }
+}
+
+$("join-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.target.querySelector("button");
+  const name = $("join-name").value.trim();
+  if (!name) return say("Give your character a name.", "err");
+  button.disabled = true;
+  try {
+    const out = await api("/api/join", {
+      method: "POST",
+      body: JSON.stringify({ token: inviteToken, name, concept: $("join-concept").value.trim() }),
+    });
+    say(`Welcome. You are ${out.character.characterName}.`, "ok");
+    location.hash = `#/c/${encodeURIComponent(out.slug)}`;
+  } catch (err) {
+    say(err.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+// ─── between turns (optional, never an advantage) ──────────────────────────
+
+/** Shared submit handler: POST a body, report the result, keep the form usable. */
+function wireSideForm(formId, path, buildBody, onOk) {
+  $(formId).addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const button = event.target.querySelector("button");
+    const body = buildBody();
+    if (body === null) return;
+    button.disabled = true;
+    try {
+      const out = await api(`/api/campaigns/${encodeURIComponent(currentSlug)}${path}`, {
+        method: "POST",
+        body: JSON.stringify(body),
+      });
+      say(onOk(out), "ok");
+      await load();
+    } catch (err) {
+      say(err.message, "err");
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+wireSideForm(
+  "downtime-form",
+  "/downtime",
+  () => ({ kind: $("dt-kind").value, detail: $("dt-detail").value.trim() }),
+  (out) => `Done — your character ${out.outcome}.`,
+);
+
+wireSideForm(
+  "letter-form",
+  "/letter",
+  () => {
+    const text = $("letter-body").value.trim();
+    if (!text) {
+      say("Write something first.", "err");
+      return null;
+    }
+    return { to: $("letter-to").value, body: text };
+  },
+  (out) => `Letter sent to ${out.to}.`,
+);
+
+wireSideForm(
+  "journal-form",
+  "/journal",
+  () => {
+    const text = $("journal-body").value.trim();
+    if (!text) {
+      say("Write something first.", "err");
+      return null;
+    }
+    return { title: $("journal-title").value.trim(), body: text };
+  },
+  () => "Added to the chronicle.",
+);
+
 // ─── routing ───────────────────────────────────────────────────────────────
 
 async function load() {
@@ -221,6 +355,17 @@ async function load() {
     const me = await api("/api/me");
     if (!me.player) throw new Error("signed out");
     $("signout").hidden = false;
+    const stashed = sessionStorage.getItem("pendingInvite");
+    if (stashed && !location.hash.startsWith("#/join/")) {
+      sessionStorage.removeItem("pendingInvite");
+      location.hash = `#/join/${stashed}`;
+      return;
+    }
+    const invite = /^#\/join\/([a-f0-9]{16,128})$/.exec(location.hash);
+    if (invite) {
+      await showInvite(invite[1]);
+      return;
+    }
     const match = /^#\/c\/([a-z0-9-]{2,31})$/.exec(location.hash);
     if (match) {
       renderCampaign(await api(`/api/campaigns/${encodeURIComponent(match[1])}`));
@@ -228,6 +373,10 @@ async function load() {
       renderHome(me);
     }
   } catch {
+    // An invited visitor who is not signed in yet must not lose the invite:
+    // stash it so the link still works after the magic-link round trip.
+    const invite = /^#\/join\/([a-f0-9]{16,128})$/.exec(location.hash);
+    if (invite) sessionStorage.setItem("pendingInvite", invite[1]);
     $("signout").hidden = true;
     show("view-signin");
   }

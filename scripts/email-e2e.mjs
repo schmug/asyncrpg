@@ -86,6 +86,7 @@ function cleanup() {
         `DELETE FROM beats WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE 'rpg-sink%';`,
     );
@@ -151,11 +152,17 @@ async function main() {
   check("campaign created for the mail test", created.status === 201, `status ${created.status}`);
   const campaignId = created.json?.campaignId;
 
-  await req(`/api/campaigns/${slug}/join`, {
+  // Joining is invite-only, so the second player has to be invited in — the
+  // same path a real group uses.
+  const invite = await req(`/api/campaigns/${slug}/invite`, { method: "POST", cookie: players[0].cookie });
+  check("host can mint an invite for the mail test", invite.status === 200, `status ${invite.status}`);
+  const token = (invite.json?.url ?? "").split("/join/")[1] ?? "";
+  const joined = await req("/api/join", {
     method: "POST",
     cookie: players[1].cookie,
-    body: { name: "Beta" },
+    body: { token, name: "Beta" },
   });
+  check("second player joined by invitation", joined.status === 200, `status ${joined.status}`);
 
   await req(`/api/campaigns/${slug}/action`, {
     method: "POST",

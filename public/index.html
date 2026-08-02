@@ -78,6 +78,29 @@
         </details>
       </section>
 
+      <!-- Invited -->
+      <section id="view-invite" hidden>
+        <h1>You've been invited</h1>
+        <p class="lede" id="invite-campaign"></p>
+        <form id="join-form" novalidate>
+          <label for="join-name">Your character's name</label>
+          <input id="join-name" name="name" type="text" required maxlength="60" placeholder="Kestrel Vane" />
+          <label for="join-concept">In a few words, who are they?</label>
+          <input
+            id="join-concept"
+            name="concept"
+            type="text"
+            maxlength="140"
+            placeholder="a courier who reads the letters she carries"
+          />
+          <button type="submit" class="primary">Join the campaign</button>
+        </form>
+        <p class="fine">
+          The story moves on a clock your group picked. Reply when it suits you — missing a turn
+          costs you nothing.
+        </p>
+      </section>
+
       <!-- A campaign -->
       <section id="view-campaign" hidden>
         <p class="crumb"><button id="back" class="linkbtn" type="button">&larr; All campaigns</button></p>
@@ -101,6 +124,72 @@
 
         <h2>The party</h2>
         <ul id="c-cast" class="list"></ul>
+        <div id="invite-box" hidden>
+          <button id="invite-btn" class="primary" type="button">Invite someone</button>
+          <p class="fine" id="invite-hint">
+            You're the host. Share the link with your group — they sign in with their email and
+            pick a character.
+          </p>
+          <label for="invite-url" id="invite-url-label" hidden>Invite link</label>
+          <input id="invite-url" type="text" readonly hidden />
+        </div>
+
+        <h2>Between turns</h2>
+        <p class="fine">
+          Optional. None of this makes your character stronger — skipping all of it costs you
+          nothing.
+        </p>
+
+        <details id="dt-details">
+          <summary>Spend some downtime</summary>
+          <form id="downtime-form" novalidate>
+            <label for="dt-kind">What do you do with the time?</label>
+            <select id="dt-kind" name="kind">
+              <option value="craft">Make something</option>
+              <option value="research">Read and ask around</option>
+              <option value="train">Practise where people can see</option>
+              <option value="network">Spend time with someone</option>
+              <option value="recover">Rest</option>
+            </select>
+            <label for="dt-detail">Details (optional)</label>
+            <input id="dt-detail" name="detail" type="text" maxlength="200" placeholder="a bone flute" />
+            <button type="submit" class="primary">Do it</button>
+          </form>
+        </details>
+
+        <details id="letter-details">
+          <summary>Write to someone in the party</summary>
+          <form id="letter-form" novalidate>
+            <label for="letter-to">To</label>
+            <select id="letter-to" name="to"></select>
+            <label for="letter-body">Your letter</label>
+            <textarea
+              id="letter-body"
+              name="body"
+              rows="4"
+              maxlength="4000"
+              placeholder="In character. The DM sees it too."
+            ></textarea>
+            <button type="submit" class="primary">Send it</button>
+          </form>
+        </details>
+
+        <details id="journal-details">
+          <summary>Write a private scene</summary>
+          <form id="journal-form" novalidate>
+            <label for="journal-title">Title (optional)</label>
+            <input id="journal-title" name="title" type="text" maxlength="120" placeholder="The night before" />
+            <label for="journal-body">What happens</label>
+            <textarea
+              id="journal-body"
+              name="body"
+              rows="5"
+              maxlength="8000"
+              placeholder="A moment only your character was there for. It joins the chronicle."
+            ></textarea>
+            <button type="submit" class="primary">Add to the chronicle</button>
+          </form>
+        </details>
 
         <p><a id="c-chronicle" href="#" class="chronlink">Read the chronicle &rarr;</a></p>
       </section>

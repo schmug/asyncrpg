@@ -148,10 +148,74 @@ export function sessionCookie(token: string, secure = true): string {
 
 export const clearedCookie = `${SESSION_COOKIE}=; Path=/; HttpOnly; SameSite=Lax; Secure; Max-Age=0`;
 
+// ─── invitations ─────────────────────────────────────────────────────────
+
+export const INVITE_TTL_DAYS = 30;
+
+/** Mint an invite link. Only the hash is stored; the plaintext is returned once. */
+export async function mintInvite(env: Env, campaignId: string, hostId: string): Promise<string> {
+  const token = randomToken();
+  await env.DB.prepare(
+    `INSERT INTO invites (token_hash, campaign_id, created_by, expires_at, created_at)
+     VALUES (?, ?, ?, ?, ?)`,
+  )
+    .bind(
+      await hash(token),
+      campaignId,
+      hostId,
+      Date.now() + INVITE_TTL_DAYS * 24 * 60 * 60 * 1000,
+      new Date().toISOString(),
+    )
+    .run();
+  return token;
+}
+
+/** Read an invite without consuming it, for the "you've been invited to X" screen. */
+export async function peekInvite(
+  env: Env,
+  token: string,
+): Promise<{ campaignId: string; campaignName: string } | null> {
+  if (!/^[a-f0-9]{16,128}$/.test(token)) return null;
+  const row = await env.DB.prepare(
+    `SELECT i.campaign_id, c.name FROM invites i JOIN campaigns c ON c.id = i.campaign_id
+     WHERE i.token_hash = ? AND i.revoked_at IS NULL AND i.expires_at > ? AND i.uses < i.max_uses`,
+  )
+    .bind(await hash(token), Date.now())
+    .first<{ campaign_id: string; name: string }>();
+  return row ? { campaignId: row.campaign_id, campaignName: row.name } : null;
+}
+
+/**
+ * Consume one use of an invite.
+ *
+ * The use counter increments in the same statement that checks the bound, so
+ * concurrent redemptions cannot together exceed `max_uses`.
+ */
+export async function redeemInvite(
+  env: Env,
+  token: string,
+): Promise<{ campaignId: string } | null> {
+  if (!/^[a-f0-9]{16,128}$/.test(token)) return null;
+  const tokenHash = await hash(token);
+  const claimed = await env.DB.prepare(
+    `UPDATE invites SET uses = uses + 1
+     WHERE token_hash = ? AND revoked_at IS NULL AND expires_at > ? AND uses < max_uses`,
+  )
+    .bind(tokenHash, Date.now())
+    .run();
+  if (claimed.meta.changes !== 1) return null;
+
+  const row = await env.DB.prepare("SELECT campaign_id FROM invites WHERE token_hash = ?")
+    .bind(tokenHash)
+    .first<{ campaign_id: string }>();
+  return row ? { campaignId: row.campaign_id } : null;
+}
+
 /** Best-effort cleanup so the token table does not grow forever. */
 export async function purgeExpiredTokens(env: Env): Promise<void> {
   try {
     await env.DB.prepare("DELETE FROM auth_tokens WHERE expires_at < ?").bind(Date.now()).run();
+    await env.DB.prepare("DELETE FROM invites WHERE expires_at < ?").bind(Date.now()).run();
     await env.DB.prepare("DELETE FROM reply_bindings WHERE expires_at < ?").bind(Date.now()).run();
   } catch {
     /* housekeeping only */

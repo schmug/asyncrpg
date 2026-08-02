@@ -95,6 +95,7 @@ function factSheet(
   state: WorldState,
   events: readonly WorldEvent[],
   resolutions: readonly ActionResolution[],
+  sideMaterial: readonly string[] = [],
 ): string {
   const where =
     (state.scene.settlementId && state.settlements[state.scene.settlementId]?.name) ??
@@ -137,6 +138,14 @@ function factSheet(
     ``,
     `WHAT THE PLAYERS DID:`,
     acts || "- (nobody acted)",
+    ...(sideMaterial.length
+      ? [
+          ``,
+          `WRITTEN BETWEEN TURNS (letters and private scenes players wrote — you may`,
+          `reference these, but do not restate them wholesale):`,
+          ...sideMaterial.map((s) => `- ${s.slice(0, 400)}`),
+        ]
+      : []),
   ].join("\n");
 }
 
@@ -170,6 +179,8 @@ export async function narrateBeat(
   events: readonly WorldEvent[],
   resolutions: readonly ActionResolution[],
   budget: BudgetGuard = UNLIMITED_BUDGET,
+  /** Letters and journals written between ticks, as plain lines of fact. */
+  sideMaterial: readonly string[] = [],
 ): Promise<Beat> {
   const fallback = templatedBeat(state, events, resolutions);
 
@@ -192,7 +203,9 @@ export async function narrateBeat(
       // Narration is a writing task, not a reasoning one — low effort keeps
       // latency and cost down without hurting prose quality.
       output_config: { effort: "low", format: { type: "json_schema", schema: BEAT_SCHEMA } },
-      messages: [{ role: "user", content: factSheet(state, events, resolutions) }],
+      messages: [
+        { role: "user", content: factSheet(state, events, resolutions, sideMaterial) },
+      ],
     });
 
     if (response.stop_reason === "refusal") {

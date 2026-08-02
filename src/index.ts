@@ -10,6 +10,10 @@ import { CampaignDO } from "./campaign-do";
 import {
   clearedCookie,
   findOrCreatePlayer,
+  INVITE_TTL_DAYS,
+  mintInvite,
+  peekInvite,
+  redeemInvite,
   mintLoginToken,
   normalizeEmail,
   purgeExpiredTokens,
@@ -179,6 +183,48 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     return renderChronicle(env, campaign);
   }
 
+  // ─── joining by invitation ─────────────────────────────────────────────
+  // Deliberately not `/api/campaigns/:slug/join`: knowing a slug is not
+  // permission to enter someone's game, and every chronicle URL contains one.
+  if (path === "/api/join" && method === "POST") {
+    if (!session) return fail(401, "not signed in");
+    const body = await readJson<{ token?: string; name?: string; concept?: string }>(request);
+    const token = (body?.token ?? "").trim();
+    const invite = await redeemInvite(env, token);
+    if (!invite) return fail(400, "that invitation is not valid any more");
+
+    const campaign = await env.DB.prepare(
+      "SELECT id, slug, name FROM campaigns WHERE id = ?",
+    )
+      .bind(invite.campaignId)
+      .first<{ id: string; slug: string; name: string }>();
+    if (!campaign) return fail(404, "that campaign no longer exists");
+
+    const name = (body?.name ?? session.displayName).trim().slice(0, 60) || "Someone";
+    const joined = await stub(env, campaign.id).join(
+      session.playerId,
+      name,
+      (body?.concept ?? "").trim().slice(0, 140) || undefined,
+    );
+    await env.DB.prepare(
+      `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
+       VALUES (?, ?, ?, ?, 'player', ?)
+       ON CONFLICT(campaign_id, player_id) DO UPDATE SET character_name = excluded.character_name`,
+    )
+      .bind(campaign.id, session.playerId, joined.characterId, joined.characterName, new Date().toISOString())
+      .run();
+    return json({ ok: true, slug: campaign.slug, name: campaign.name, character: joined });
+  }
+
+  // Lets the invite screen say which campaign you were invited to before you
+  // commit to a character name. Reveals only the name, never the contents.
+  const previewMatch = /^\/api\/invite\/([a-f0-9]{16,128})$/.exec(path);
+  if (previewMatch && method === "GET") {
+    const invite = await peekInvite(env, previewMatch[1]!);
+    if (!invite) return fail(404, "that invitation is not valid any more");
+    return json({ ok: true, campaign: invite.campaignName });
+  }
+
   // ─── campaigns ─────────────────────────────────────────────────────────
   if (path === "/api/campaigns" && method === "POST") {
     if (!session) return fail(401, "not signed in");
@@ -220,31 +266,31 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
     if (!session) return fail(401, "not signed in");
 
-    if (action === "/join" && method === "POST") {
-      const body = await readJson<{ name?: string; concept?: string }>(request);
-      const name = (body?.name ?? session.displayName).trim().slice(0, 60) || "Someone";
-      const joined = await campaignStub.join(
-        session.playerId,
-        name,
-        (body?.concept ?? "").trim().slice(0, 140) || undefined,
-      );
-      await env.DB.prepare(
-        `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
-         VALUES (?, ?, ?, ?, 'player', ?)
-         ON CONFLICT(campaign_id, player_id) DO UPDATE SET character_name = excluded.character_name`,
-      )
-        .bind(campaign.id, session.playerId, joined.characterId, joined.characterName, new Date().toISOString())
-        .run();
-      return json({ ok: true, character: joined });
-    }
-
     const member = await isMember(env, campaign.id, session.playerId);
+
+    // Only the host can mint an invitation, and only members can see who is in.
+    if (action === "/invite" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can invite people");
+      }
+      const token = await mintInvite(env, campaign.id, session.playerId);
+      return json({
+        ok: true,
+        url: `${env.PUBLIC_ORIGIN}/#/join/${token}`,
+        expiresInDays: INVITE_TTL_DAYS,
+      });
+    }
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
       const snapshot = await campaignStub.snapshot();
       const prompt = await campaignStub.promptForPlayer(session.playerId);
-      return json({ campaign: { slug: campaign.slug, ...snapshot }, prompt });
+      return json({
+        campaign: { slug: campaign.slug, ...snapshot },
+        prompt,
+        playerId: session.playerId,
+        isHost: campaign.created_by === session.playerId,
+      });
     }
 
     if (action === "/action" && method === "POST") {
@@ -254,6 +300,107 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       const result = await campaignStub.submitAction(session.playerId, text, "web");
       if (!result.accepted) return fail(400, result.reason ?? "not accepted");
       return json({ ok: true, resolvedNow: result.resolvedNow });
+    }
+
+    // ─── deep play: optional, and never an advantage ─────────────────────
+    // These exist for people who want to do more between turns. None of them
+    // changes a character's attributes or skills, so a player who ignores all
+    // of it is not behind anyone — see src/sim/downtime.ts.
+    if (action === "/downtime" && method === "POST") {
+      const body = await readJson<{ kind?: string; detail?: string; targetId?: string }>(request);
+      const out = await campaignStub.submitDowntime(
+        session.playerId,
+        (body?.kind ?? "").trim(),
+        (body?.detail ?? "").trim().slice(0, 400),
+        (body?.targetId ?? "").trim() || null,
+      );
+      if (!out.ok) return fail(400, out.reason ?? "could not do that");
+      await env.DB.prepare(
+        `INSERT INTO downtime (id, campaign_id, character_id, tick, kind, detail, outcome, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          `dt_${crypto.randomUUID().slice(0, 12)}`,
+          campaign.id,
+          `chr_${session.playerId}`,
+          0,
+          body?.kind ?? "",
+          (body?.detail ?? "").slice(0, 400),
+          out.outcome ?? "",
+          new Date().toISOString(),
+        )
+        .run()
+        .catch(() => {});
+      return json({ ok: true, outcome: out.outcome });
+    }
+
+    if (action === "/letter" && method === "POST") {
+      const body = await readJson<{ to?: string; body?: string }>(request);
+      const text = (body?.body ?? "").trim();
+      const to = (body?.to ?? "").trim();
+      if (text.length < 2) return fail(400, "write something");
+      if (!to) return fail(400, "say who it is for");
+      const snapshot = await campaignStub.snapshot();
+      const recipient = snapshot.cast.find(
+        (c) => c.characterId === to || c.name.toLowerCase() === to.toLowerCase(),
+      );
+      if (!recipient) return fail(400, "no such character in this campaign");
+
+      await env.DB.prepare(
+        `INSERT INTO letters (id, campaign_id, from_character, to_character, tick, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          `ltr_${crypto.randomUUID().slice(0, 12)}`,
+          campaign.id,
+          `chr_${session.playerId}`,
+          recipient.characterId,
+          snapshot.tick,
+          text.slice(0, 4000),
+          new Date().toISOString(),
+        )
+        .run();
+      await campaignStub.recordSideMaterial(
+        "letter",
+        `a letter was sent to ${recipient.name}: ${text.slice(0, 240)}`,
+      );
+      return json({ ok: true, to: recipient.name });
+    }
+
+    if (action === "/journal" && method === "POST") {
+      const body = await readJson<{ title?: string; body?: string }>(request);
+      const text = (body?.body ?? "").trim();
+      if (text.length < 2) return fail(400, "write something");
+      const snapshot = await campaignStub.snapshot();
+      const mine = snapshot.cast.find((c) => c.playerId === session.playerId);
+
+      await env.DB.prepare(
+        `INSERT INTO journals (id, campaign_id, character_id, tick, title, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          `jrn_${crypto.randomUUID().slice(0, 12)}`,
+          campaign.id,
+          mine?.characterId ?? `chr_${session.playerId}`,
+          snapshot.tick,
+          (body?.title ?? "").trim().slice(0, 120),
+          text.slice(0, 8000),
+          new Date().toISOString(),
+        )
+        .run();
+      await campaignStub.recordSideMaterial(
+        "journal",
+        `${mine?.name ?? "someone"} wrote privately: ${text.slice(0, 240)}`,
+      );
+      return json({ ok: true });
+    }
+
+    if (action === "/reproject" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can rebuild the chronicle");
+      }
+      const out = await campaignStub.reproject();
+      return json({ ok: true, ...out });
     }
 
     if (action === "/resolve" && method === "POST") {

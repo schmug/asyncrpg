@@ -93,6 +93,13 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     `</div>`;
 
   let assignedMessageId: string | null = null;
+  let lastError: unknown = null;
+
+  // One retry. Most send failures are transient (rate limit, upstream blip),
+  // and the beat is the product's primary channel — dropping it on the first
+  // stumble loses a player their turn. A second failure is logged and the
+  // player still has the web copy.
+  for (let attempt = 0; attempt < 2; attempt++) {
   try {
     // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
     // ("Only whitelisted headers and X-* headers are accepted"), so the
@@ -115,18 +122,27 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
 
     const raw = sent?.messageId ?? sent?.message_id ?? sent?.id ?? null;
     assignedMessageId = raw ? raw.replace(/^<|>$/g, "") : null;
+    lastError = null;
+    break;
   } catch (err) {
+    lastError = err;
+    if (attempt === 0) {
+      await new Promise((r) => setTimeout(r, 750));
+      continue;
+    }
     // A delivery failure must not stop the tick — the beat is already stored
     // and readable on the web, and the next tick's mail carries the player
     // forward. But it must not be *silent*: swallowing this without a log
     // makes a total mail outage invisible, which is the one failure mode that
     // breaks the product's primary channel while every dashboard stays green.
     console.error(
-      `email send failed campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
+      `email send failed after retry campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
       err instanceof Error ? err.message : String(err),
     );
     return null;
   }
+  }
+  if (lastError) return null;
 
   try {
     await env.DB.prepare(

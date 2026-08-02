@@ -132,6 +132,25 @@ export async function handleInboundEmail(
     return;
   }
 
+  // Replay defense. A binding records the tick its beat described; replying to
+  // a three-week-old email would submit an intention formed against a world
+  // that no longer exists — the party has moved, the threat has grown, the
+  // NPC is dead. Bouncing with a pointer to the current turn is kinder than
+  // silently acting on stale intent, and costs nothing but one more reply.
+  if (binding) {
+    const current = await env.DB.prepare("SELECT tick FROM campaigns WHERE id = ?")
+      .bind(campaignId)
+      .first<{ tick: number }>();
+    const now = current?.tick ?? binding.tick;
+    if (binding.tick < now - 1) {
+      message.setReject(
+        `That reply is from turn ${binding.tick} and the story is on turn ${now}. ` +
+          `Reply to the most recent email so your action fits where everyone actually is.`,
+      );
+      return;
+    }
+  }
+
   // If a binding named a player, it must be the same person. A forwarded beat
   // must not let its recipient act as the player it was addressed to.
   if (binding && binding.player_id !== sender.id) {

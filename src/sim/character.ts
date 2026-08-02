@@ -95,6 +95,21 @@ export function joinCharacter(state: WorldState, req: JoinRequest): Character {
   return character;
 }
 
+/**
+ * Renown as a phrase, not a score.
+ *
+ * Showing "known 42/100" next to every player turns the one axis that
+ * accumulates into a leaderboard, and a leaderboard makes being busy look like
+ * losing. The underlying number still drives difficulty; players see standing.
+ */
+export function renownLabel(renown: number): string {
+  if (renown >= 85) return "spoken of everywhere";
+  if (renown >= 65) return "well known";
+  if (renown >= 40) return "known around here";
+  if (renown >= 18) return "a familiar face";
+  return "not yet known";
+}
+
 export interface AbsenceConfig {
   /** Ticks of silence before the DM starts acting for a character. */
   driftAfterTicks: number;

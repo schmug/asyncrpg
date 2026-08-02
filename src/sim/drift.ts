@@ -282,6 +282,45 @@ function resolveAgenda(
 }
 
 /**
+ * Write the canonical one-line description of where the party stands.
+ *
+ * Deterministic and derived purely from world state, so replaying a tick
+ * reproduces it exactly and no model output can leak into the state the next
+ * tick reads. The narrator may describe the same scene far more beautifully;
+ * that prose lives in the beat, which is a read model, not in the world.
+ */
+export function describeScene(state: WorldState): void {
+  const region = state.regions[state.scene.regionId];
+  const town = state.scene.settlementId ? state.settlements[state.scene.settlementId] : undefined;
+  const where = town && !town.razed ? town.name : (region?.name ?? "the road");
+
+  const threat = Object.values(state.threats)
+    .filter((t) => !t.resolved && t.revealed && t.regionId === state.scene.regionId)
+    .sort((a, b) => b.severity - a.severity)[0];
+
+  const clauses: string[] = [`${where} in the ${state.season} of year ${state.year}`];
+
+  if (town && !town.razed) {
+    if (town.unrest >= 65) clauses.push("the town is close to trouble");
+    else if (town.prosperity < 30) clauses.push("the market has thinned to almost nothing");
+    else if (town.prosperity > 70) clauses.push("trade is good");
+  } else if (town?.razed) {
+    clauses.push("nothing here is lived in any more");
+  }
+
+  if (threat) {
+    clauses.push(
+      threat.severity >= HARM_AT
+        ? `${threat.name} is taking a real toll`
+        : `${threat.name} is spoken of`,
+    );
+  }
+  if (region && region.danger >= 55) clauses.push("the roads are not safe");
+
+  state.scene.situation = `${clauses.join(". ")}.`.slice(0, 200);
+}
+
+/**
  * Refill the world's supply of pressure.
  *
  * Conquest, plague and time all consume the things a story pushes against. Left
@@ -644,7 +683,12 @@ export function driftWorld(
   // the difference between a world with a history and a world with an ending.
   renewWorld(state, rng.fork("renewal"), log, forge);
 
-  // ─── Scene tension ─────────────────────────────────────────────────────
+  // ─── Scene ─────────────────────────────────────────────────────────────
+  // The scene line is canonical world state, so the simulation writes it.
+  // Letting the narrator supply it would hand the model authority over state
+  // that the next tick reads back — the exact thing the design forbids.
+  describeScene(state);
+
   const sceneRegion = state.regions[state.scene.regionId];
   const localThreat = Object.values(state.threats)
     .filter((t) => !t.resolved && t.revealed && t.regionId === state.scene.regionId)

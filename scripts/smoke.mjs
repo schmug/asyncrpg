@@ -91,6 +91,10 @@ function cleanup() {
         `DELETE FROM beats WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM downtime WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM letters WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM journals WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE '${SMOKE_PREFIX}%';`,
     );
@@ -197,11 +201,34 @@ async function main() {
   console.log("\nadversarial:");
   const outsider = seedSession("outsider");
 
+  // `/api/me` answers anonymously rather than 401-ing, so the security
+  // property to assert is "not authenticated", not "returns 401". Both are
+  // checked: identity must be null, AND a forged cookie must not open a
+  // protected endpoint — otherwise this check could pass while an auth bypass
+  // existed behind it.
   const forged = await req("/api/me", { cookie: "arpg_session=" + "a".repeat(64) });
-  check("forged session cookie is rejected", forged.status === 401);
+  check(
+    "a forged session cookie does not authenticate",
+    forged.status === 200 && forged.json?.player === null,
+    `status ${forged.status} player=${JSON.stringify(forged.json?.player)}`,
+  );
+  const forgedProtected = await req(`/api/campaigns/${slug}`, {
+    cookie: "arpg_session=" + "a".repeat(64),
+  });
+  check("a forged session cookie cannot reach a protected endpoint", forgedProtected.status === 401);
 
   const malformedCookie = await req("/api/me", { cookie: "arpg_session=../../etc/passwd" });
-  check("malformed session cookie is rejected", malformedCookie.status === 401);
+  check(
+    "a malformed session cookie does not authenticate",
+    malformedCookie.status === 200 && malformedCookie.json?.player === null,
+  );
+  const malformedProtected = await req(`/api/campaigns/${slug}`, {
+    cookie: "arpg_session=../../etc/passwd",
+  });
+  check(
+    "a malformed session cookie cannot reach a protected endpoint",
+    malformedProtected.status === 401,
+  );
 
   const noAuthRead = await req(`/api/campaigns/${slug}`);
   check("campaign read requires a session", noAuthRead.status === 401);
@@ -216,17 +243,73 @@ async function main() {
   });
   check("non-member cannot act in a campaign", nonMemberAct.status === 403);
 
-  // Join, then confirm a mere member still cannot force the clock.
-  await req(`/api/campaigns/${slug}/join`, {
+  // Knowing a slug must not be permission to enter someone's game — every
+  // chronicle URL contains one.
+  const slugJoin = await req(`/api/campaigns/${slug}/join`, {
     method: "POST",
     cookie: outsider.cookie,
     body: { name: "Interloper" },
   });
+  check("cannot join a campaign just by knowing its slug", slugJoin.status >= 400, `status ${slugJoin.status}`);
+
+  const outsiderInvite = await req(`/api/campaigns/${slug}/invite`, {
+    method: "POST",
+    cookie: outsider.cookie,
+  });
+  check("a non-member cannot mint an invite", outsiderInvite.status === 403);
+
+  const badInvite = await req("/api/join", {
+    method: "POST",
+    cookie: outsider.cookie,
+    body: { token: "f".repeat(64), name: "Nobody" },
+  });
+  check("an unknown invite token is refused", badInvite.status === 400);
+
+  const malformedInvite = await req("/api/join", {
+    method: "POST",
+    cookie: outsider.cookie,
+    body: { token: "../../etc/passwd", name: "Nobody" },
+  });
+  check("a malformed invite token is refused", malformedInvite.status === 400);
+
+  // Host invites; the invitee joins and becomes a real member.
+  const invite = await req(`/api/campaigns/${slug}/invite`, { method: "POST", cookie: host.cookie });
+  check("host can mint an invite", invite.status === 200 && typeof invite.json?.url === "string");
+  const token = (invite.json?.url ?? "").split("/join/")[1] ?? "";
+
+  const preview = await req(`/api/invite/${token}`);
+  check("invite preview names the campaign without revealing its contents", preview.status === 200 && preview.json?.campaign === `Smoke ${stamp}`);
+
+  const anonJoin = await req("/api/join", { method: "POST", body: { token, name: "Nobody" } });
+  check("joining requires being signed in", anonJoin.status === 401);
+
+  const joined = await req("/api/join", {
+    method: "POST",
+    cookie: outsider.cookie,
+    body: { token, name: "Interloper", concept: "a late arrival" },
+  });
+  check("an invited player can join", joined.status === 200 && joined.json?.ok === true, `status ${joined.status}`);
+
+  const nowMember = await req(`/api/campaigns/${slug}`, { cookie: outsider.cookie });
+  check("joining actually grants access", nowMember.status === 200);
+
   const memberResolve = await req(`/api/campaigns/${slug}/resolve`, {
     method: "POST",
     cookie: outsider.cookie,
   });
   check("a non-host member cannot force a turn", memberResolve.status === 403, `status ${memberResolve.status}`);
+
+  const memberReproject = await req(`/api/campaigns/${slug}/reproject`, {
+    method: "POST",
+    cookie: outsider.cookie,
+  });
+  check("a non-host member cannot rebuild the chronicle", memberReproject.status === 403);
+
+  const hostReproject = await req(`/api/campaigns/${slug}/reproject`, {
+    method: "POST",
+    cookie: host.cookie,
+  });
+  check("the host can rebuild the chronicle from canonical state", hostReproject.status === 200);
 
   const dupSlug = await req("/api/campaigns", {
     method: "POST",
@@ -281,6 +364,32 @@ async function main() {
   check(
     "player-authored markup is escaped in the chronicle",
     !afterXss.text.includes("<img src=x onerror") && !afterXss.text.includes("<b>loudly</b>"),
+  );
+
+  console.log("\ndeep play (optional, never an advantage):");
+  for (const kind of ["craft", "research", "train", "network", "recover"]) {
+    const out = await req(`/api/campaigns/${slug}/downtime`, {
+      method: "POST",
+      cookie: host.cookie,
+      body: { kind },
+    });
+    check(`downtime "${kind}" resolves`, out.status === 200 && Boolean(out.json?.outcome), out.json?.outcome ?? out.json?.error);
+  }
+  check(
+    "an unknown downtime activity is refused",
+    (await req(`/api/campaigns/${slug}/downtime`, { method: "POST", cookie: host.cookie, body: { kind: "teleport" } })).status === 400,
+  );
+  check(
+    "a journal entry is accepted",
+    (await req(`/api/campaigns/${slug}/journal`, { method: "POST", cookie: host.cookie, body: { body: "I could not sleep." } })).status === 200,
+  );
+  check(
+    "an empty journal entry is refused",
+    (await req(`/api/campaigns/${slug}/journal`, { method: "POST", cookie: host.cookie, body: { body: "  " } })).status === 400,
+  );
+  check(
+    "a letter to a non-existent character is refused",
+    (await req(`/api/campaigns/${slug}/letter`, { method: "POST", cookie: host.cookie, body: { to: "chr_ghost", body: "hi" } })).status === 400,
   );
 
   const methodNotAllowed = await req(`/api/campaigns/${slug}/action`, { cookie: host.cookie });
