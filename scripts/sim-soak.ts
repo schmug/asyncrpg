@@ -11,13 +11,12 @@
  * Usage: npm run sim:soak -- [--ticks 500] [--seed my-campaign] [--quiet]
  */
 
-import { driftWorld } from "../src/sim/drift";
-import { EventLog } from "../src/sim/events";
+import { joinCharacter } from "../src/sim/character";
 import { generateWorld } from "../src/sim/genesis";
 import { checkWorldInvariants } from "../src/sim/invariants";
-import { NameForge } from "../src/sim/names";
 import { Rng, seedFrom } from "../src/sim/prng";
-import type { WorldEvent } from "../src/sim/types";
+import { DEFAULT_CAMPAIGN_CONFIG, runTick } from "../src/sim/tick";
+import type { ActionKind, PlayerAction, WorldEvent, WorldState } from "../src/sim/types";
 
 function arg(name: string, fallback: string): string {
   const i = process.argv.indexOf(`--${name}`);
@@ -33,53 +32,87 @@ if (!Number.isFinite(ticks) || ticks < 1) {
   process.exit(1);
 }
 
-const { state, events: history } = generateWorld(campaignId, seedFrom(campaignId, 0, "genesis"), {
-  historyYears: 80,
-});
+const ACTION_KINDS_POOL: ActionKind[] = ["aid", "parley", "scout", "confront", "trade", "guard", "study"];
 
-const violationsAtGenesis = checkWorldInvariants(state);
-if (violationsAtGenesis.length > 0) {
-  console.error(`FAIL: genesis violated invariants:\n  - ${violationsAtGenesis.join("\n  - ")}`);
+/**
+ * A table of four with realistic participation:
+ *   p0 shows up nearly always, p1 about half the time, p2 rarely,
+ *   p3 plays for a while and then vanishes entirely partway through.
+ *
+ * That last one is the case the whole design exists to handle, so the soak
+ * had better exercise it rather than assuming everyone is diligent.
+ */
+function submissionsFor(state: WorldState, t: number, rng: Rng): PlayerAction[] {
+  const out: PlayerAction[] = [];
+  const chars = Object.values(state.characters).sort((a, b) => a.id.localeCompare(b.id));
+  const participation = [0.9, 0.5, 0.12, t < ticks * 0.3 ? 0.7 : 0];
+  chars.forEach((c, i) => {
+    if (!rng.chance(participation[i] ?? 0.3)) return;
+    out.push({
+      id: `soak-${c.id}-${t}`,
+      characterId: c.id,
+      playerId: c.playerId,
+      tick: t,
+      kind: rng.pick(ACTION_KINDS_POOL),
+      targetId: null,
+      rawText: "I do what needs doing.",
+      intent: "does what needs doing",
+      via: "web",
+      auto: false,
+    });
+  });
+  return out;
+}
+
+function play(id: string, n: number): { state: WorldState; events: WorldEvent[]; history: WorldEvent[] } {
+  const { state, events: history } = generateWorld(id, seedFrom(id, 0, "genesis"), { historyYears: 80 });
+  for (let i = 0; i < 4; i++) {
+    joinCharacter(state, { playerId: `p${i}`, name: `Player ${i}`, seed: seedFrom(id, i, "join") });
+  }
+
+  const violationsAtGenesis = checkWorldInvariants(state);
+  if (violationsAtGenesis.length > 0) {
+    console.error(`FAIL: genesis violated invariants:\n  - ${violationsAtGenesis.join("\n  - ")}`);
+    process.exit(1);
+  }
+
+  const events: WorldEvent[] = [];
+  for (let t = 1; t <= n; t++) {
+    const rng = new Rng(seedFrom(id, t, "soak-submissions"));
+    const result = runTick(state, submissionsFor(state, t, rng), DEFAULT_CAMPAIGN_CONFIG, {
+      history: events,
+    });
+    events.push(...result.events);
+
+    const violations = checkWorldInvariants(state);
+    if (violations.length > 0) {
+      console.error(`FAIL: tick ${t} violated invariants:\n  - ${violations.join("\n  - ")}`);
+      process.exit(1);
+    }
+  }
+  return { state, events, history };
+}
+
+const { state, events: all, history } = play(campaignId, ticks);
+
+// Determinism: an identical replay must produce an identical world.
+const replay = play(campaignId, ticks);
+if (JSON.stringify(replay.state) !== JSON.stringify(state)) {
+  console.error("FAIL: replay diverged — the simulation is not deterministic");
   process.exit(1);
 }
 
-const forge = new NameForge([
-  ...Object.values(state.regions).map((r) => r.name),
-  ...Object.values(state.settlements).map((s) => s.name),
-  ...Object.values(state.factions).map((f) => f.name),
-  ...Object.values(state.npcs).map((n) => n.name),
-  ...Object.values(state.threats).map((t) => t.name),
-]);
-
-const all: WorldEvent[] = [];
-for (let t = 1; t <= ticks; t++) {
-  state.tick = t;
-  const log = new EventLog(t);
-  driftWorld(state, new Rng(seedFrom(campaignId, t, "world")), log, forge);
-  all.push(...log.events);
-
-  const violations = checkWorldInvariants(state);
-  if (violations.length > 0) {
-    console.error(`FAIL: tick ${t} violated invariants:\n  - ${violations.join("\n  - ")}`);
-    process.exit(1);
-  }
+// The core promise, asserted mechanically: the player who stopped showing up
+// must not have been degraded in any way by having stopped.
+const quitter = Object.values(state.characters).find((c) => c.playerId === "p3");
+if (!quitter) {
+  console.error("FAIL: soak lost a character");
+  process.exit(1);
 }
-
-// Determinism: an identical replay must produce an identical world.
-const replay = generateWorld(campaignId, seedFrom(campaignId, 0, "genesis"), { historyYears: 80 });
-const replayForge = new NameForge([
-  ...Object.values(replay.state.regions).map((r) => r.name),
-  ...Object.values(replay.state.settlements).map((s) => s.name),
-  ...Object.values(replay.state.factions).map((f) => f.name),
-  ...Object.values(replay.state.npcs).map((n) => n.name),
-  ...Object.values(replay.state.threats).map((t) => t.name),
-]);
-for (let t = 1; t <= ticks; t++) {
-  replay.state.tick = t;
-  driftWorld(replay.state, new Rng(seedFrom(campaignId, t, "world")), new EventLog(t), replayForge);
-}
-if (JSON.stringify(replay.state) !== JSON.stringify(state)) {
-  console.error("FAIL: replay diverged — the simulation is not deterministic");
+if (quitter.renown < 5 || quitter.conditions.length > 0) {
+  console.error(
+    `FAIL: absent player was penalised — renown ${quitter.renown}, conditions [${quitter.conditions}]`,
+  );
   process.exit(1);
 }
 
@@ -100,6 +133,10 @@ console.log(`  towns razed    : ${razed}/${Object.keys(state.settlements).length
 console.log(`  threats ended  : ${resolved}/${Object.keys(state.threats).length}`);
 console.log(`  invariants     : held on all ${ticks} ticks`);
 console.log(`  determinism    : replay identical`);
+console.log(
+  `  absent player  : presence=${quitter.presence} renown=${quitter.renown.toFixed(1)} ` +
+    `conditions=[${quitter.conditions.join(", ")}] — unpenalised`,
+);
 
 if (!quiet) {
   console.log(`\nmost significant moments:`);

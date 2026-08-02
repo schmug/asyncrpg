@@ -328,4 +328,10 @@ export interface TickResult {
   state: WorldState;
   events: WorldEvent[];
   resolutions: ActionResolution[];
+  /**
+   * Keyed by character id, for players who returned this tick after being
+   * offscreen. Built from the chronicle, not from a model, so it is accurate
+   * and costs nothing.
+   */
+  recaps: Record<EntityId, string[]>;
 }
