@@ -108,6 +108,12 @@
         <p id="c-where" class="lede"></p>
 
         <div id="c-clock" class="clock"></div>
+        <p id="c-repair" class="status err" hidden></p>
+
+        <section id="beat-box" hidden>
+          <h2 id="beat-heading">The story so far</h2>
+          <article id="beat" class="beat"></article>
+        </section>
 
         <form id="action-form" novalidate>
           <label for="action" id="action-label">What do you do?</label>
@@ -121,6 +127,11 @@
           ></textarea>
           <button type="submit" class="primary">Submit turn</button>
         </form>
+
+        <details id="sheet-details">
+          <summary>Your character</summary>
+          <div id="sheet"></div>
+        </details>
 
         <h2>The party</h2>
         <ul id="c-cast" class="list"></ul>

@@ -151,15 +151,34 @@ export class CampaignDO extends DurableObject<Env> {
     const db = this.env.DB;
     return {
       canSpend: async (campaignId) => {
+        // Global kill switch first: when spend is running away, one row flip
+        // should stop every campaign at once without waiting for a deploy.
+        try {
+          const flag = await db
+            .prepare("SELECT value FROM settings WHERE key = 'inference_enabled'")
+            .first<{ value: string }>();
+          if (flag && flag.value !== "1") return false;
+        } catch {
+          /* a missing settings table must not disable the game */
+        }
+
         if (!Number.isFinite(cap) || cap <= 0) return true;
         try {
           const row = await db
-            .prepare("SELECT output_tokens FROM token_budget WHERE campaign_id = ? AND month = ?")
+            .prepare(
+              "SELECT input_tokens, output_tokens FROM token_budget WHERE campaign_id = ? AND month = ?",
+            )
             .bind(campaignId, month)
-            .first<{ output_tokens: number }>();
-          return (row?.output_tokens ?? 0) < cap;
+            .first<{ input_tokens: number; output_tokens: number }>();
+          // Both directions count. Output-only was the wrong meter: this
+          // workload sends a large fact sheet every tick, so input is the
+          // bigger share of the bill and was entirely unmetered.
+          const spent = (row?.input_tokens ?? 0) + (row?.output_tokens ?? 0);
+          return spent < cap;
         } catch {
-          // A budget-table failure must not stop the game. Allow and log.
+          // A budget-table failure must not stop the game — but it must not be
+          // invisible either, or the cap silently stops existing.
+          console.error(`budget check failed for ${campaignId}; allowing and degrading open`);
           return true;
         }
       },
@@ -175,11 +194,43 @@ export class CampaignDO extends DurableObject<Env> {
             )
             .bind(campaignId, month, inputTokens, outputTokens)
             .run();
-        } catch {
-          /* accounting is best-effort; play is not */
+        } catch (err) {
+          console.error(
+            `budget accounting failed for ${campaignId}:`,
+            err instanceof Error ? err.message : String(err),
+          );
         }
       },
     };
+  }
+
+  /** Record that the read model drifted from canon, so it is visible and repairable. */
+  async #recordProjectionFailure(
+    campaignId: string,
+    tick: number,
+    kind: string,
+    err: unknown,
+  ): Promise<void> {
+    const detail = err instanceof Error ? err.message : String(err);
+    console.error(`projection failed campaign=${campaignId} tick=${tick} kind=${kind}: ${detail}`);
+    try {
+      await this.env.DB.prepare(
+        `INSERT INTO projection_failures (id, campaign_id, tick, kind, detail, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)`,
+      )
+        .bind(
+          `pf_${crypto.randomUUID().slice(0, 12)}`,
+          campaignId,
+          tick,
+          kind,
+          detail.slice(0, 500),
+          new Date().toISOString(),
+        )
+        .run();
+    } catch {
+      // If D1 is down hard we cannot record that D1 is down. The console line
+      // above is the fallback; reproject repairs whatever was missed.
+    }
   }
 
   // ─── lifecycle ─────────────────────────────────────────────────────────
@@ -399,6 +450,30 @@ export class CampaignDO extends DurableObject<Env> {
       );
       this.#put("world", before);
       this.ctx.storage.sql.exec("DELETE FROM pending");
+
+      // Canon does not advance, but the record of it must. A turn that
+      // silently does nothing is indistinguishable from an outage to the
+      // group, and to anyone debugging it later.
+      try {
+        await this.env.DB.prepare(
+          `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at)
+           VALUES (?, ?, ?, ?, 'blocked', ?)
+           ON CONFLICT(campaign_id, tick) DO NOTHING`,
+        )
+          .bind(
+            before.campaignId,
+            before.tick,
+            "The turn could not be resolved — the world would have ended up in a state that " +
+              "cannot be true. Nothing was lost; the story simply did not move. " +
+              "Everyone's submitted actions were cleared, so send them again when you like.",
+            before.scene.situation,
+            new Date().toISOString(),
+          )
+          .run();
+      } catch (err) {
+        await this.#recordProjectionFailure(before.campaignId, before.tick, "blocked-beat", err);
+      }
+
       await this.#scheduleNextTick();
       return {
         tick: before.tick,
@@ -537,8 +612,8 @@ export class CampaignDO extends DurableObject<Env> {
       )
         .bind(state.campaignId, state.tick, beat.prose, beat.situation, beat.source, new Date().toISOString())
         .run();
-    } catch {
-      /* the beat is also returned to callers; a projection failure is not fatal */
+    } catch (err) {
+      await this.#recordProjectionFailure(state.campaignId, state.tick, "beat", err);
     }
   }
 
@@ -570,8 +645,8 @@ export class CampaignDO extends DurableObject<Env> {
           ),
         );
       }
-    } catch {
-      /* chronicle projection is a read model; losing a write is recoverable */
+    } catch (err) {
+      await this.#recordProjectionFailure(campaignId, events[0]?.tick ?? 0, "events", err);
     }
   }
 
@@ -600,8 +675,8 @@ export class CampaignDO extends DurableObject<Env> {
           ),
         );
       }
-    } catch {
-      /* same: read model */
+    } catch (err) {
+      await this.#recordProjectionFailure(state.campaignId, state.tick, "entities", err);
     }
   }
 
@@ -647,6 +722,67 @@ export class CampaignDO extends DurableObject<Env> {
     };
   }
 
+  /**
+   * Everything one player needs to understand their own position.
+   *
+   * Previously the app showed a prompt and a party list and nothing else — you
+   * had to leave for the chronicle to find out what had actually happened, and
+   * there was no way at all to see your own character. That is a poor surface
+   * for the app that is meant to be the richer one.
+   */
+  async mySheet(playerId: string): Promise<{
+    characterId: string;
+    name: string;
+    concept: string;
+    attributes: Record<string, number>;
+    skills: Record<string, number>;
+    tendencies: string[];
+    conditions: string[];
+    standing: string;
+    presence: string;
+    where: string;
+    /** Named bonds, strongest first — the relationships that make a campaign. */
+    bonds: { name: string; feeling: string }[];
+  } | null> {
+    const world = this.#get<WorldState>("world");
+    if (!world) return null;
+    const c = Object.values(world.characters).find((x) => x.playerId === playerId);
+    if (!c) return null;
+
+    const nameOf = (id: string): string | null =>
+      world.npcs[id]?.name ?? world.factions[id]?.name ?? world.settlements[id]?.name ?? null;
+
+    const bonds = Object.entries(c.bonds)
+      .map(([id, value]) => ({ name: nameOf(id), value }))
+      .filter((b): b is { name: string; value: number } => b.name !== null && Math.abs(b.value) >= 8)
+      .sort((a, b) => Math.abs(b.value) - Math.abs(a.value))
+      .slice(0, 8)
+      .map((b) => ({
+        name: b.name,
+        feeling:
+          b.value >= 55 ? "trusts you" : b.value >= 20 ? "thinks well of you" :
+          b.value > 0 ? "knows you" :
+          b.value > -25 ? "is wary of you" : "holds a grudge",
+      }));
+
+    return {
+      characterId: c.id,
+      name: c.name,
+      concept: c.concept,
+      attributes: c.attributes,
+      skills: c.skills,
+      tendencies: c.tendencies,
+      conditions: c.conditions,
+      standing: renownLabel(c.renown),
+      presence: c.presence,
+      where:
+        (c.locationId && world.settlements[c.locationId]?.name) ??
+        (c.locationId && world.regions[c.locationId]?.name) ??
+        "the road",
+      bonds,
+    };
+  }
+
   /** The exact prompt a player should be answering right now. */
   async promptForPlayer(playerId: string): Promise<string | null> {
     const world = this.#world();
@@ -675,6 +811,15 @@ export class CampaignDO extends DurableObject<Env> {
         .run();
     } catch {
       /* the tick mirror is cosmetic */
+    }
+    try {
+      await this.env.DB.prepare(
+        "UPDATE projection_failures SET resolved_at = ? WHERE campaign_id = ? AND resolved_at IS NULL",
+      )
+        .bind(new Date().toISOString(), world.campaignId)
+        .run();
+    } catch {
+      /* best effort */
     }
     return { entities: Object.keys(world.characters).length + Object.keys(world.npcs).length, events: history.length };
   }

@@ -181,6 +181,40 @@ function renderCampaign(data) {
     cast.append(li);
   }
 
+  // The beat is the story. Showing it here means the app is not a control
+  // panel that points at the real thing somewhere else.
+  const beatBox = $("beat-box");
+  const beat = $("beat");
+  beat.textContent = "";
+  if (data.latestBeat) {
+    if (data.latestBeat.source !== "model") {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent =
+        data.latestBeat.source === "blocked"
+          ? "this turn could not be resolved"
+          : "recorded without narration";
+      beat.append(tag);
+    }
+    for (const para of data.latestBeat.prose.split(/\n{2,}/)) {
+      const p = document.createElement("p");
+      p.textContent = para;
+      beat.append(p);
+    }
+    $("beat-heading").textContent = `Turn ${data.latestBeat.tick}`;
+    beatBox.hidden = false;
+  } else {
+    beatBox.hidden = true;
+  }
+
+  renderSheet(data.you);
+
+  const repair = $("c-repair");
+  repair.hidden = !data.chronicleNeedsRepair;
+  repair.textContent = data.chronicleNeedsRepair
+    ? "The public chronicle is behind the campaign. The host can rebuild it."
+    : "";
+
   // Letters go to other players, so the recipient list is everyone but you.
   const to = $("letter-to");
   to.textContent = "";
@@ -198,6 +232,80 @@ function renderCampaign(data) {
 
   $("c-chronicle").href = `/c/${encodeURIComponent(c.slug)}`;
   show("view-campaign");
+}
+
+function renderSheet(you) {
+  const box = $("sheet");
+  box.textContent = "";
+  if (!you) {
+    $("sheet-details").hidden = true;
+    return;
+  }
+  $("sheet-details").hidden = false;
+
+  const dl = document.createElement("dl");
+  const row = (label, build) => {
+    const dt = document.createElement("dt");
+    dt.textContent = label;
+    const dd = document.createElement("dd");
+    build(dd);
+    dl.append(dt, dd);
+  };
+
+  row("Who", (dd) => {
+    dd.textContent = `${you.name} — ${you.concept}`;
+  });
+  row("Where", (dd) => {
+    dd.textContent = `${you.where} · ${you.standing}` + (you.presence !== "present" ? ` · ${you.presence}` : "");
+  });
+  row("Attributes", (dd) => {
+    const wrap = document.createElement("div");
+    wrap.className = "stats";
+    for (const [k, v] of Object.entries(you.attributes)) {
+      const s = document.createElement("span");
+      s.className = "stat";
+      s.textContent = `${k} ${v}`;
+      wrap.append(s);
+    }
+    dd.append(wrap);
+  });
+  if (Object.keys(you.skills).length) {
+    row("Skills", (dd) => {
+      const wrap = document.createElement("div");
+      wrap.className = "stats";
+      for (const [k, v] of Object.entries(you.skills)) {
+        const s = document.createElement("span");
+        s.className = "stat";
+        s.textContent = `${k} ${v}`;
+        wrap.append(s);
+      }
+      dd.append(wrap);
+    });
+  }
+  if (you.tendencies.length) {
+    row("Tendencies", (dd) => {
+      dd.textContent = you.tendencies.join(" · ");
+    });
+  }
+  if (you.conditions.length) {
+    row("Right now", (dd) => {
+      dd.textContent = you.conditions.join(", ");
+    });
+  }
+  if (you.bonds.length) {
+    row("People who know you", (dd) => {
+      const ul = document.createElement("ul");
+      ul.style.margin = "0";
+      ul.style.paddingLeft = "1.1rem";
+      for (const b of you.bonds) {
+        const li = document.createElement("li");
+        li.textContent = `${b.name} ${b.feeling}`;
+        ul.append(li);
+      }
+      dd.append(ul);
+    });
+  }
+  box.append(dl);
 }
 
 $("action-form").addEventListener("submit", async (event) => {

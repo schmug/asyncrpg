@@ -278,6 +278,30 @@ try {
   check("confirmation is not an error", !(await page.locator("#status").getAttribute("class")).includes("err"));
   await page.screenshot({ path: `${OUT}/06-turn-submitted.png`, fullPage: true });
 
+  // The app must be understandable on its own — the story, your character,
+  // and your position, without leaving for the chronicle.
+  await page.reload({ waitUntil: "networkidle" });
+  await page.waitForSelector("#view-campaign:not([hidden])", { timeout: 30_000 });
+  const beatVisible = await page.locator("#beat-box").isVisible();
+  check("the latest beat is shown in the app", beatVisible);
+  if (beatVisible) {
+    const beatText = await page.locator("#beat").innerText();
+    check("the beat has readable prose", beatText.length > 60, `${beatText.length} chars`);
+  }
+  await page.locator("#sheet-details summary").tap();
+  if (!(await page.locator("#sheet-details").getAttribute("open"))) {
+    await page.evaluate("document.getElementById('sheet-details').open = true");
+  }
+  const sheetText = await page.locator("#sheet").innerText();
+  check("the character sheet is reachable in the app", sheetText.length > 30, sheetText.slice(0, 60).replace(/\n/g, " "));
+  check("the sheet shows attributes", /might/i.test(sheetText));
+  await page.screenshot({ path: `${OUT}/06b-beat-and-sheet.png`, fullPage: true });
+
+  touchIssues = await page.evaluate(TOUCH_TARGET_AUDIT);
+  check("all touch targets >= 44px tall (with beat and sheet)", touchIssues.length === 0, touchIssues.join("; "));
+  a11y = await page.evaluate(A11Y_AUDIT);
+  check("no accessibility issues (with beat and sheet)", a11y.length === 0, a11y.join("; "));
+
   // ─── chronicle ─────────────────────────────────────────────────────────
   console.log("\nchronicle:");
   const chronicle = await context.newPage();

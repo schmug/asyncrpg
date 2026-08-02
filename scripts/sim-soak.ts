@@ -65,6 +65,18 @@ function submissionsFor(state: WorldState, t: number, rng: Rng): PlayerAction[] 
   return out;
 }
 
+/** Snapshot of the things the no-penalty promise covers. */
+function promiseState(state: WorldState, playerId: string) {
+  const c = Object.values(state.characters).find((x) => x.playerId === playerId);
+  if (!c) return null;
+  return {
+    renown: c.renown,
+    conditions: c.conditions.length,
+    attributes: JSON.stringify(c.attributes),
+    skills: JSON.stringify(c.skills),
+  };
+}
+
 function play(id: string, n: number): { state: WorldState; events: WorldEvent[]; history: WorldEvent[] } {
   const { state, events: history } = generateWorld(id, seedFrom(id, 0, "genesis"), { historyYears: 80 });
   for (let i = 0; i < 4; i++) {
@@ -78,6 +90,11 @@ function play(id: string, n: number): { state: WorldState; events: WorldEvent[];
   }
 
   const events: WorldEvent[] = [];
+  // The promise is about what absence costs, so it is measured from the moment
+  // the player stops playing — not against an absolute floor, which would
+  // wrongly count risks they took while present.
+  let atDeparture: ReturnType<typeof promiseState> = null;
+
   for (let t = 1; t <= n; t++) {
     const rng = new Rng(seedFrom(id, t, "soak-submissions"));
     const result = runTick(state, submissionsFor(state, t, rng), DEFAULT_CAMPAIGN_CONFIG, {
@@ -92,6 +109,33 @@ function play(id: string, n: number): { state: WorldState; events: WorldEvent[];
     if (violations.length > 0) {
       console.error(`FAIL: tick ${t} violated invariants:\n  - ${violations.join("\n  - ")}`);
       process.exit(1);
+    }
+
+    // p3 stops at 30% of the run; capture their state the tick they go quiet,
+    // then assert nothing about them gets worse for the rest of the campaign.
+    const cutoff = Math.floor(ticks * 0.3);
+    if (t === cutoff) atDeparture = promiseState(state, "p3");
+    if (atDeparture && t > cutoff) {
+      const now = promiseState(state, "p3");
+      if (!now) {
+        console.error(`FAIL: tick ${t}: the absent player's character disappeared`);
+        process.exit(1);
+      }
+      const worse: string[] = [];
+      if (now.renown < atDeparture.renown - 0.001) {
+        worse.push(`renown ${atDeparture.renown.toFixed(1)} -> ${now.renown.toFixed(1)}`);
+      }
+      if (now.conditions > atDeparture.conditions) {
+        worse.push(`conditions ${atDeparture.conditions} -> ${now.conditions}`);
+      }
+      if (now.attributes !== atDeparture.attributes) worse.push("attributes changed");
+      if (now.skills !== atDeparture.skills) worse.push("skills changed");
+      if (worse.length > 0) {
+        console.error(
+          `FAIL: tick ${t}: absence made the quiet player worse off — ${worse.join("; ")}`,
+        );
+        process.exit(1);
+      }
     }
   }
   return { state, events, history };
@@ -113,9 +157,9 @@ if (!quitter) {
   console.error("FAIL: soak lost a character");
   process.exit(1);
 }
-if (quitter.renown < 5 || quitter.conditions.length > 0) {
+if (quitter.conditions.length > 0) {
   console.error(
-    `FAIL: absent player was penalised — renown ${quitter.renown}, conditions [${quitter.conditions}]`,
+    `FAIL: absent player is still carrying conditions after a long absence: [${quitter.conditions}]`,
   );
   process.exit(1);
 }
@@ -145,6 +189,36 @@ console.log(
 // An endless campaign has to fit in a Durable Object row forever. Unbounded
 // growth here is a slow-motion outage, so the soak fails on it rather than
 // reporting it.
+// Economy sanity. A world where every settlement sits at prosperity 100 with
+// a population of half a million, and every faction at power 100, has no
+// scarcity and therefore no politics — it passes every invariant and is still
+// a failed simulation. This is the guard for that.
+const towns = Object.values(state.settlements).filter((s) => !s.razed);
+const livingFactions = Object.values(state.factions).filter((f) => !f.defunct);
+const maxedTowns = towns.filter((s) => s.prosperity >= 99).length;
+const maxedFactions = livingFactions.filter((f) => f.power >= 99).length;
+const biggest = towns.reduce((m, s) => Math.max(m, s.population), 0);
+const POP_CEILING = 60_000;
+
+console.log(
+  `  economy       : prosperity ${towns.length ? Math.round(towns.reduce((a, s) => a + s.prosperity, 0) / towns.length) : 0} avg, ` +
+    `largest town ${biggest.toLocaleString()}, ` +
+    `faction power ${livingFactions.length ? Math.round(livingFactions.reduce((a, f) => a + f.power, 0) / livingFactions.length) : 0} avg`,
+);
+
+if (towns.length > 1 && maxedTowns === towns.length) {
+  console.error(`\nFAIL: every settlement saturated at prosperity 100 — the economy has no ceiling`);
+  process.exit(1);
+}
+if (livingFactions.length > 1 && maxedFactions === livingFactions.length) {
+  console.error(`\nFAIL: every faction saturated at power 100 — nobody can threaten anybody`);
+  process.exit(1);
+}
+if (biggest > POP_CEILING) {
+  console.error(`\nFAIL: largest settlement reached ${biggest} — population growth is unbounded`);
+  process.exit(1);
+}
+
 const stateBytes = JSON.stringify(state).length;
 const STATE_CEILING = 500_000;
 console.log(

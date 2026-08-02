@@ -17,6 +17,7 @@ import {
   mintLoginToken,
   normalizeEmail,
   purgeExpiredTokens,
+  rateLimit,
   redeemLoginToken,
   revokeSession,
   sessionCookie,
@@ -119,6 +120,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
 
   // ─── auth ──────────────────────────────────────────────────────────────
   if (path === "/api/auth/request" && method === "POST") {
+    // Unauthenticated and it sends mail, so it is the obvious thing to abuse.
+    const ip = request.headers.get("cf-connecting-ip") ?? "unknown";
+    if (!(await rateLimit(env, `signin:${ip}`, 8))) {
+      return fail(429, "too many sign-in requests — wait a minute and try again");
+    }
     const body = await readJson<{ email?: string }>(request);
     const email = body?.email ? normalizeEmail(body.email) : null;
     // Always the same answer, valid address or not: this endpoint must not be
@@ -283,17 +289,40 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
-      const snapshot = await campaignStub.snapshot();
-      const prompt = await campaignStub.promptForPlayer(session.playerId);
+      const [snapshot, prompt, sheet, latest, openFailures] = await Promise.all([
+        campaignStub.snapshot(),
+        campaignStub.promptForPlayer(session.playerId),
+        campaignStub.mySheet(session.playerId),
+        env.DB.prepare(
+          "SELECT tick, prose, source FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 1",
+        )
+          .bind(campaign.id)
+          .first<{ tick: number; prose: string; source: string }>(),
+        env.DB.prepare(
+          "SELECT COUNT(*) AS n FROM projection_failures WHERE campaign_id = ? AND resolved_at IS NULL",
+        )
+          .bind(campaign.id)
+          .first<{ n: number }>(),
+      ]);
       return json({
         campaign: { slug: campaign.slug, ...snapshot },
         prompt,
+        you: sheet,
+        latestBeat: latest ?? null,
         playerId: session.playerId,
         isHost: campaign.created_by === session.playerId,
+        // Surfaced to the host so a chronicle drifting from canon is visible
+        // rather than something only a log would ever show.
+        chronicleNeedsRepair: (openFailures?.n ?? 0) > 0,
       });
     }
 
     if (action === "/action" && method === "POST") {
+      // A turn is a slow, expensive operation (intent parse + possibly a tick
+      // with narration). Nobody legitimately submits twenty a minute.
+      if (!(await rateLimit(env, `action:${session.playerId}`, 12))) {
+        return fail(429, "slow down a moment");
+      }
       const body = await readJson<{ text?: string }>(request);
       const text = (body?.text ?? "").trim();
       if (!text) return fail(400, "write what your character does");

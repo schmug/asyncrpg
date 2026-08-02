@@ -212,3 +212,49 @@ describe("absence — the no-penalty promise", () => {
     expect(state.characters[absent.id]!.renown).toBeGreaterThanOrEqual(start);
   });
 });
+
+describe("absence heals rather than preserving harm", () => {
+  it("clears conditions a character was carrying when they went quiet", () => {
+    // Found by the 1500-tick soak: conditions are cleared by *acting*, so a
+    // player who stopped while wounded stayed wounded indefinitely and would
+    // return months later still carrying it. That is an injury preserved
+    // because they were away.
+    const state = world("heal");
+    const c = Object.values(state.characters).find((x) => x.playerId === "p3")!;
+    c.conditions = ["wounded", "shaken"];
+    for (let t = 0; t < 20; t++) runTick(state, [act(state, "p0")], cfg);
+    expect(state.characters[c.id]!.conditions).toEqual([]);
+  });
+
+  it("does not clear conditions for a player who is still showing up", () => {
+    const state = world("noheal");
+    const c = Object.values(state.characters).find((x) => x.playerId === "p0")!;
+    c.conditions = ["wounded"];
+    // p0 acts every tick, so they stay present and must heal by playing.
+    for (let t = 0; t < 4; t++) {
+      runTick(state, [act(state, "p0")], cfg);
+      state.characters[c.id]!.conditions = ["wounded"];
+    }
+    expect(state.characters[c.id]!.presence).toBe("present");
+  });
+
+  it("nothing about an absent character gets worse over a long absence", () => {
+    const state = world("promise");
+    const c = Object.values(state.characters).find((x) => x.playerId === "p3")!;
+    for (let t = 0; t < 5; t++) runTick(state, [act(state, "p0")], cfg);
+    const at = {
+      renown: state.characters[c.id]!.renown,
+      conditions: state.characters[c.id]!.conditions.length,
+      attributes: JSON.stringify(state.characters[c.id]!.attributes),
+      skills: JSON.stringify(state.characters[c.id]!.skills),
+    };
+    for (let t = 0; t < 150; t++) {
+      runTick(state, [act(state, "p0")], cfg);
+      const now = state.characters[c.id]!;
+      expect(now.renown).toBeGreaterThanOrEqual(at.renown);
+      expect(now.conditions.length).toBeLessThanOrEqual(at.conditions);
+      expect(JSON.stringify(now.attributes)).toBe(at.attributes);
+      expect(JSON.stringify(now.skills)).toBe(at.skills);
+    }
+  });
+});

@@ -28,6 +28,31 @@ function makeCharacter(state: WorldState, id = "chr_1"): Character {
   return c;
 }
 
+/**
+ * Guarantee an unresolved threat to act against.
+ *
+ * These tests used to reach for whatever threat genesis happened to leave
+ * unresolved, which quietly coupled them to world-generation tuning: an
+ * unrelated economy change resolved every threat in this seed and three tests
+ * started failing on `undefined`.
+ */
+function ensureThreat(state: WorldState) {
+  const existing = Object.values(state.threats).find((t) => !t.resolved);
+  if (existing) return existing;
+  const id = "thr_test";
+  state.threats[id] = {
+    id,
+    name: "the Test Blight",
+    kind: "blight",
+    regionId: Object.keys(state.regions)[0]!,
+    severity: 40,
+    growthRate: 0.5,
+    revealed: false,
+    resolved: false,
+  };
+  return state.threats[id]!;
+}
+
 function action(over: Partial<PlayerAction> & { kind: ActionKind }): PlayerAction {
   return {
     id: "act-1",
@@ -93,7 +118,7 @@ describe("resolveAction", () => {
   });
 
   it("produces the full spread of outcomes when difficulty spans the range", () => {
-    const threat = Object.values(state.threats).find((t) => !t.resolved)!;
+    const threat = ensureThreat(state);
     threat.revealed = true;
     const seen = new Set<string>();
     // Sweep both competence and difficulty; every tier must be reachable
@@ -212,7 +237,7 @@ describe("resolveAction", () => {
     });
 
     it("lets confronting a threat actually reduce it", () => {
-      const threat = Object.values(state.threats).find((t) => !t.resolved)!;
+      const threat = ensureThreat(state);
       threat.severity = 70;
       threat.revealed = true;
       const before = threat.severity;
@@ -225,7 +250,7 @@ describe("resolveAction", () => {
     });
 
     it("reveals a hidden threat on a successful scout", () => {
-      const threat = Object.values(state.threats).find((t) => !t.resolved)!;
+      const threat = ensureThreat(state);
       threat.revealed = false;
       threat.severity = 20;
       let revealed = false;

@@ -464,15 +464,20 @@ export function driftWorld(
       });
     }
 
-    // Economy: holdings fund the treasury, the treasury sustains power.
+    // Economy. Income scales with what the faction holds; upkeep scales with
+    // how much power it is trying to sustain and how many places it must
+    // garrison. The old rule had income with a flat 1.5 upkeep, so any faction
+    // holding a prosperous town accumulated without limit and pinned at
+    // treasury 100 / power 100 — at which point nobody can be threatened by
+    // anybody and the politics stop meaning anything.
     const held = heldSettlements(state, faction.id);
-    const income = held.reduce((sum, s) => sum + s.prosperity, 0) / Math.max(1, held.length * 12);
-    faction.treasury = clamp(faction.treasury + income - 1.5, 0, 100);
-    faction.power = clamp(
-      faction.power + (faction.treasury > 60 ? 0.6 : faction.treasury < 20 ? -0.9 : 0),
-      0,
-      100,
-    );
+    const income = held.reduce((sum, s) => sum + s.prosperity, 0) / 13;
+    const upkeep = 0.9 + faction.power * 0.05 + held.length * 0.7;
+    faction.treasury = clamp(faction.treasury + (income - upkeep) * 0.5, 0, 100);
+
+    // Power mean-reverts toward what the treasury and holdings can support.
+    const sustainable = clamp(12 + faction.treasury * 0.45 + held.length * 7, 0, 96);
+    faction.power = clamp(faction.power + (sustainable - faction.power) * 0.05, 0, 100);
     if (faction.seatSettlementId && !state.settlements[faction.seatSettlementId]) {
       faction.seatSettlementId = held[0]?.id ?? null;
     }
@@ -585,13 +590,47 @@ export function driftWorld(
     const lord = s.controllingFactionId ? state.factions[s.controllingFactionId] : undefined;
     const wasProsperity = s.prosperity;
     const wasUnrest = s.unrest;
-    const pull = (lord && !lord.defunct ? lord.power / 14 : -1.5) - (region ? region.danger / 22 : 0);
-    s.prosperity = clamp(s.prosperity + pull * 0.4 + (townRng.next() - 0.5) * 2, 0, 100);
+
+    // Prosperity mean-reverts toward what the place can actually sustain,
+    // rather than climbing while conditions are good. Without a target it
+    // simply ratchets to 100 and stays there — which is what happened: every
+    // settlement in the demo world pinned at prosperity 100, unrest 0, and a
+    // world with no scarcity anywhere has nothing to play about.
+    // A floor that does not depend on the lord. Prosperity, treasury and power
+    // are circularly coupled — prosperity funds the treasury, the treasury
+    // sustains power, power lifts prosperity — so tying prosperity entirely to
+    // the ruling faction lets all three spiral *down* together as readily as
+    // up. People trade whether or not anyone is in charge; good governance is
+    // a bonus on top, not the whole basis.
+    const target = clamp(
+      34 + (lord && !lord.defunct ? lord.power * 0.22 : -6) - (region ? region.danger * 0.3 : 0),
+      8,
+      92,
+    );
+    s.prosperity = clamp(
+      s.prosperity + (target - s.prosperity) * 0.06 + (townRng.next() - 0.5) * 1.5,
+      0,
+      100,
+    );
+
     s.unrest = clamp(
       s.unrest + (s.prosperity < 30 ? 1.6 : -1.1) + (townRng.next() - 0.5),
       0,
       100,
     );
+
+    // Logistic growth against a carrying capacity. The old rule was
+    // `pop *= 1 + (prosperity - 45)/4000`, which is unbounded compounding:
+    // over eighty years of generated history a village of 400 became a city
+    // of 450,000. Land feeds only so many people.
+    const capacity = Math.max(120, Math.round(300 + s.prosperity * 110 - (region?.danger ?? 0) * 8));
+    const headroom = 1 - s.population / capacity;
+    s.population = Math.max(
+      0,
+      Math.round(s.population + s.population * 0.02 * headroom + (headroom > 0 ? 1 : -1)),
+    );
+
+    s.defense = clamp(s.defense - 0.25, 0, 100);
 
     // Threshold crossings are the texture a reader notices between the big
     // beats — "the market has thinned" long before "the town revolted".
@@ -615,8 +654,6 @@ export function driftWorld(
         { targetIds: [s.id], regionId: s.regionId, significance: 40, data: { year: state.year } },
       );
     }
-    s.population = Math.max(0, Math.round(s.population * (1 + (s.prosperity - 45) / 4000)));
-    s.defense = clamp(s.defense - 0.25, 0, 100);
 
     if (s.unrest >= 85 && townRng.chance(0.22)) {
       const previous = s.controllingFactionId;

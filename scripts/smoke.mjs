@@ -32,6 +32,14 @@ function check(name, ok, detail = "") {
   console.log(`  [${mark}] ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
+function d1Rows(sql) {
+  try {
+    return JSON.parse(d1(sql))[0]?.results ?? [];
+  } catch {
+    return [];
+  }
+}
+
 function d1(sql) {
   return execFileSync(
     "npx",
@@ -91,6 +99,7 @@ function cleanup() {
         `DELETE FROM beats WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM projection_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM downtime WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM letters WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
@@ -391,6 +400,46 @@ async function main() {
     "a letter to a non-existent character is refused",
     (await req(`/api/campaigns/${slug}/letter`, { method: "POST", cookie: host.cookie, body: { to: "chr_ghost", body: "hi" } })).status === 400,
   );
+
+  console.log("\noperational controls:");
+  const snapAfter = await req(`/api/campaigns/${slug}`, { cookie: host.cookie });
+  check(
+    "the campaign view carries the latest beat, so the story is in-app",
+    typeof snapAfter.json?.latestBeat?.prose === "string" && snapAfter.json.latestBeat.prose.length > 40,
+    `${snapAfter.json?.latestBeat?.prose?.length ?? 0} chars`,
+  );
+  check(
+    "the campaign view carries the player's own character sheet",
+    Boolean(snapAfter.json?.you?.name) && typeof snapAfter.json?.you?.attributes?.might === "number",
+  );
+  check(
+    "chronicle repair state is reported",
+    typeof snapAfter.json?.chronicleNeedsRepair === "boolean",
+  );
+
+  // Both token directions must be metered — input is the larger share here.
+  const budget = d1Rows(
+    `SELECT input_tokens, output_tokens FROM token_budget WHERE campaign_id = '${esc(campaignId)}'`,
+  );
+  check(
+    "inference spend is metered in both directions",
+    budget.length > 0 && budget[0].input_tokens > 0 && budget[0].output_tokens > 0,
+    JSON.stringify(budget[0] ?? {}),
+  );
+
+  const killSwitch = d1Rows(`SELECT value FROM settings WHERE key = 'inference_enabled'`);
+  check("a global inference kill switch exists", killSwitch.length === 1, JSON.stringify(killSwitch[0] ?? {}));
+
+  // Rate limiting: hammer the sign-in endpoint and expect it to push back.
+  let limited = false;
+  for (let i = 0; i < 14 && !limited; i++) {
+    const r = await req("/api/auth/request", {
+      method: "POST",
+      body: { email: `${SMOKE_PREFIX}+rl${i}-${stamp}@example.invalid` },
+    });
+    if (r.status === 429) limited = true;
+  }
+  check("sign-in requests are rate limited", limited);
 
   const methodNotAllowed = await req(`/api/campaigns/${slug}/action`, { cookie: host.cookie });
   check("wrong method is refused", methodNotAllowed.status === 405 || methodNotAllowed.status === 404);

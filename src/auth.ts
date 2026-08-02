@@ -227,11 +227,43 @@ export async function redeemInvite(
   return row ? { campaignId: row.campaign_id } : null;
 }
 
+/**
+ * Fixed-window rate limit, one row per (key, minute).
+ *
+ * Cheap and approximate on purpose: the goal is to stop someone hammering the
+ * sign-in endpoint or spamming actions, not to be a precise quota system. Fails
+ * *open* — a rate-limit table outage must not lock everyone out of their game.
+ */
+export async function rateLimit(
+  env: Env,
+  key: string,
+  limit: number,
+  windowSeconds = 60,
+): Promise<boolean> {
+  const window = Math.floor(Date.now() / (windowSeconds * 1000));
+  const bucket = `${key}:${window}`;
+  try {
+    await env.DB.prepare(
+      `INSERT INTO rate_limits (bucket, count, expires_at) VALUES (?, 1, ?)
+       ON CONFLICT(bucket) DO UPDATE SET count = count + 1`,
+    )
+      .bind(bucket, (window + 2) * windowSeconds * 1000)
+      .run();
+    const row = await env.DB.prepare("SELECT count FROM rate_limits WHERE bucket = ?")
+      .bind(bucket)
+      .first<{ count: number }>();
+    return (row?.count ?? 0) <= limit;
+  } catch {
+    return true;
+  }
+}
+
 /** Best-effort cleanup so the token table does not grow forever. */
 export async function purgeExpiredTokens(env: Env): Promise<void> {
   try {
     await env.DB.prepare("DELETE FROM auth_tokens WHERE expires_at < ?").bind(Date.now()).run();
     await env.DB.prepare("DELETE FROM invites WHERE expires_at < ?").bind(Date.now()).run();
+    await env.DB.prepare("DELETE FROM rate_limits WHERE expires_at < ?").bind(Date.now()).run();
     await env.DB.prepare("DELETE FROM reply_bindings WHERE expires_at < ?").bind(Date.now()).run();
   } catch {
     /* housekeeping only */

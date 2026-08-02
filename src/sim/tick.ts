@@ -139,6 +139,14 @@ export function runTick(
     const missed = tick - character.lastActedTick;
     const next = presenceFor(missed, cfg);
     character.presence = next;
+
+    // Time off-page heals. Conditions are cleared by acting, so a character
+    // who stops playing while wounded stays wounded forever and returns
+    // months later still carrying it — an injury preserved precisely *because*
+    // they were away, which is the penalty this design forbids. Away is rest.
+    if (next !== "present" && character.conditions.length > 0 && missed % 3 === 0) {
+      character.conditions.shift();
+    }
     if (next === "offscreen" && wasPresence !== "offscreen") {
       log.add(
         "character_offscreen",
