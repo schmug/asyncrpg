@@ -105,6 +105,24 @@ describe("chapters", () => {
     expect(out[0]!.title).toBe("Traernstead threw out its rulers");
   });
 
+  it("breaks on a world event the significance score alone would overlook", () => {
+    // A settlement changing hands scores in the seventies; it is exactly the
+    // kind of turn a chapter should start at.
+    const out = chapters([3, 2, 1].map(beat), [event(2, "Suspaes threw out its rulers", 72)]);
+    expect(out).toHaveLength(2);
+    expect(out[0]!.title).toBe("Suspaes threw out its rulers");
+  });
+
+  it("does not break on a merely well-rolled action", () => {
+    // Roughly one critical success happens per turn. If each began a chapter,
+    // every turn would be its own chapter and the grouping would say nothing.
+    const out = chapters(
+      [3, 2, 1].map(beat),
+      [event(2, "Bram Ashfoot checks the stores", 80, "player_action")],
+    );
+    expect(out).toHaveLength(1);
+  });
+
   it("still uses a player action when that is all the turn had", () => {
     const out = chapters(
       [2, 1].map(beat),

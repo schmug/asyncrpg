@@ -169,10 +169,16 @@ export function chapters(beats: BeatRow[], events: EventRow[]): Chapter[] {
   // scored higher. "The Concern went to war" is what a chapter is about;
   // "Bram checked the stores, and it went well" is a good turn, not an era —
   // and a well-rolled routine action clears the significance bar easily.
+  // The bar is different for the two, and deliberately so. A settlement
+  // throwing out its rulers scores in the seventies; a routine action that
+  // rolls a critical success scores about the same, and there is one of those
+  // most turns. Judging them on one number made every turn a chapter and named
+  // half of them after an errand.
   const RANK = (kind: string): number => (kind === "player_action" ? 0 : 1);
+  const BAR = (kind: string): number => (kind === "player_action" ? 85 : 70);
   const defining = new Map<number, EventRow>();
   for (const e of events) {
-    if (e.significance < 75) continue;
+    if (e.significance < BAR(e.kind)) continue;
     const held = defining.get(e.tick);
     if (!held || RANK(e.kind) > RANK(held.kind)) defining.set(e.tick, e);
   }
