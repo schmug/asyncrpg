@@ -77,7 +77,15 @@ async function req(path, { method = "GET", body, cookie } = {}) {
 }
 
 async function main() {
-  console.log(`seeding demo "${SLUG}" on ${BASE}\n`);
+  console.log(`seeding demo "${SLUG}" on ${BASE}`);
+  // Every tick mails every member, and Cloudflare's sending quota is
+  // account-wide and daily. Seeding a long chronicle once exhausted it and
+  // broke outbound mail for the rest of the day, including sign-in links —
+  // so the cost is stated up front rather than discovered afterwards.
+  console.log(
+    `  this will send about ${TICKS * 3} emails ` +
+      `(${TICKS} ticks × 3 players) against the account's daily quota\n`,
+  );
 
   // Reset so re-running is idempotent.
   d1(

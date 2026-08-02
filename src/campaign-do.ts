@@ -743,7 +743,12 @@ export class CampaignDO extends DurableObject<Env> {
       // A beat that did not reach its player is a lost turn on the primary
       // channel. Record it against that player so the app can tell them
       // plainly, and clear the moment a later beat gets through.
-      await this.#recordDelivery(state.campaignId, member.player_id, state.tick, sent !== null);
+      await this.#recordDelivery(
+        state.campaignId,
+        member.player_id,
+        state.tick,
+        sent.ok ? null : sent.error,
+      );
     }
   }
 
@@ -751,10 +756,11 @@ export class CampaignDO extends DurableObject<Env> {
     campaignId: string,
     playerId: string,
     tick: number,
-    delivered: boolean,
+    /** Null when the beat went out; otherwise the provider's own words. */
+    error: string | null,
   ): Promise<void> {
     try {
-      if (delivered) {
+      if (error === null) {
         await this.env.DB.prepare(
           `UPDATE delivery_failures SET resolved_at = ?
            WHERE campaign_id = ? AND player_id = ? AND resolved_at IS NULL`,
@@ -772,7 +778,7 @@ export class CampaignDO extends DurableObject<Env> {
           campaignId,
           playerId,
           tick,
-          "send failed after retry",
+          error.slice(0, 300),
           new Date().toISOString(),
         )
         .run();

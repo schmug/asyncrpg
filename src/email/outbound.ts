@@ -52,7 +52,10 @@ export interface BeatMail {
  * Send one player their beat, and record the binding that lets their reply
  * resolve without them doing anything but hitting reply.
  */
-export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string } | null> {
+/** Why a beat did or did not reach its player — the reason matters downstream. */
+export type SendResult = { ok: true; code: string } | { ok: false; error: string };
+
+export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   const domain = env.MAIL_DOMAIN;
   // The reply capability for exactly this (campaign, player, tick). See
   // ./token.ts for why it rides the subject line rather than the Reply-To.
@@ -145,10 +148,14 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
       `email send failed after retry campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return null;
+    // Hand the reason back rather than a bare null. "Quota exceeded" and "the
+    // provider is down" need completely different responses, and a delivery
+    // record that cannot tell them apart is a record of the wrong thing.
+    // Never thrown: a delivery failure must not stop a tick resolving.
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   }
-  if (lastError) return null;
+  if (lastError) return { ok: false, error: String(lastError) };
 
   try {
     await env.DB.prepare(
@@ -179,9 +186,9 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
       `reply binding insert failed campaign=${mail.campaignId} tick=${mail.tick}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { code };
+    return { ok: true, code };
   }
-  return { code };
+  return { ok: true, code };
 }
 
 export async function sendMagicLink(env: Env, toEmail: string, token: string): Promise<boolean> {
