@@ -15,6 +15,7 @@ import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeAll, beforeEach, describe, expect, it } from "vitest";
 import worker from "../../src/index";
 import type { Env } from "../../src/env";
+import { mintReplyCode } from "../../src/email/token";
 
 // The runtime resolves bindings from wrangler.jsonc, but `cloudflare:workers`
 // types `env` as the empty ambient `Cloudflare.Env`. Narrow it once here
@@ -340,6 +341,87 @@ describe("inbound email handler", () => {
       );
       expect(state.rejected).toBe(true);
       expect(state.reason).toMatch(/does not belong to you/i);
+    });
+
+    it("rejects a reply to a beat the story has already moved past", async () => {
+      // Replay defense. The binding describes tick 3; the campaign is on tick
+      // 6. Acting on intent formed three turns ago would submit a decision
+      // about a world that no longer exists, so it bounces with a pointer to
+      // the current turn rather than resolving quietly.
+      await env.DB.prepare("UPDATE campaigns SET tick = ? WHERE id = ?").bind(6, CAMPAIGN).run();
+
+      const state = await deliver(
+        mime({
+          from: PLAYER_EMAIL,
+          to: INBOX,
+          subject: `Re: [Test Hold #${CODE}] Tick 3 — The Envoy`,
+          inReplyTo: `<${BOUND_MESSAGE_ID}>`,
+          body: "I open the gate and let him in.",
+        }),
+        PLAYER_EMAIL,
+      );
+      expect(state.rejected).toBe(true);
+      expect(state.reason).toMatch(/turn 3 and the story is on turn 6/i);
+    });
+
+    it("still accepts a reply to the turn that has only just resolved", async () => {
+      // One turn of slack: mail sent for tick 3 is often answered just as tick
+      // 4 opens, and bouncing that would punish a player for ordinary latency.
+      await env.DB.prepare("UPDATE campaigns SET tick = ? WHERE id = ?").bind(4, CAMPAIGN).run();
+
+      const state = await deliver(
+        mime({
+          from: PLAYER_EMAIL,
+          to: INBOX,
+          subject: `Re: [Test Hold #${CODE}] Tick 3`,
+          inReplyTo: `<${BOUND_MESSAGE_ID}>`,
+          body: "I open the gate.",
+        }),
+        PLAYER_EMAIL,
+      );
+      expect(state.rejected).toBe(false);
+    });
+
+    it("does not honour a reply code that fails to authenticate its binding", async () => {
+      // A current-format code is an HMAC over the (campaign, player, tick) it
+      // names. Here the stored row says tick 9 while the code was minted for
+      // tick 3, so the code does not authenticate the row it found and is
+      // treated as absent. The player is in two campaigns, so with no usable
+      // binding there is nothing left to disambiguate on — which is exactly
+      // the outcome a forged code should produce.
+      const now = new Date().toISOString();
+      const minted = await mintReplyCode(env.EMAIL_TOKEN_SECRET, {
+        campaignId: CAMPAIGN,
+        playerId: PLAYER,
+        tick: 3,
+      });
+      await env.DB.prepare(
+        "INSERT INTO reply_bindings (code, message_id, campaign_id, player_id, tick, expires_at, created_at) VALUES (?,?,?,?,?,?,?)",
+      )
+        .bind(minted, "beat-tampered@cortech.online", CAMPAIGN, PLAYER, 9, Date.now() + 86_400_000, now)
+        .run();
+      await env.DB.prepare(
+        "INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at) VALUES (?,?,?,?,?,?)",
+      )
+        .bind("cmp_second", "second", "Second", "weekly", PLAYER, now)
+        .run();
+      await env.DB.prepare(
+        "INSERT INTO memberships (campaign_id, player_id, character_id, character_name, joined_at) VALUES (?,?,?,?,?)",
+      )
+        .bind("cmp_second", PLAYER, "chr_second", "Second", now)
+        .run();
+
+      const state = await deliver(
+        mime({
+          from: PLAYER_EMAIL,
+          to: INBOX,
+          subject: `Re: [Test Hold #${minted}] Tick 9`,
+          body: "I act.",
+        }),
+        PLAYER_EMAIL,
+      );
+      expect(state.rejected).toBe(true);
+      expect(state.reason).toMatch(/which story/i);
     });
 
     it("rejects a reply whose body is only quoted text", async () => {

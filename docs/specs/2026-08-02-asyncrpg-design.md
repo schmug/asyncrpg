@@ -193,15 +193,67 @@ primary evidence that the world model is real rather than decorative.
 
 ### Email (primary)
 
-- Outbound from `dm@play.cortech.online`.
-- `Reply-To: play+<token>@play.cortech.online` where `token` is an HMAC-signed
-  `(campaignId, playerId, tickId)`.
-- Inbound verification requires **all** of:
-  1. valid HMAC over the token payload;
-  2. envelope sender matches the player's registered address;
-  3. tick is current or next (replay defense).
+- Outbound from `dm@cortech.online`.
+- Every beat carries an HMAC reply capability over `(campaignId, playerId,
+  tick)` — 16 base32 characters, 60 bits of tag — minted in
+  `src/email/token.ts`.
 
-  A leaked email alone must not let a third party act as that player.
+#### Where the capability rides, and why it is not the Reply-To
+
+This was specified as `Reply-To: play+<token>@…`, which is where a capability
+belongs. Two Cloudflare constraints made that unavailable:
+
+- **Email Routing matches rules on exact addresses.** A plus-addressed reply
+  is not covered by the `rpg@cortech.online` rule, and the apex catch-all on
+  this zone is already routed to an unrelated Worker — so a plus-addressed
+  reply would be delivered somewhere else entirely. Fixing that is a zone-level
+  change owned by the domain's owner, not by this app.
+- **Email Sending rejects a caller-supplied `Message-ID`** ("Only whitelisted
+  headers and X-\* headers are accepted"), so the threading id cannot be chosen
+  by us either; it is read back off the send response.
+
+The subject code is the one carrier that survives every mail client's reply
+without a zone change, so the capability rides there:
+`[Ashfall #<token>] Tick 14 — …`. A subject is a weaker place to keep a secret
+than an address — it is quoted into forwards and shown in notifications — so
+possession of a token is deliberately **not sufficient on its own**.
+
+#### What inbound verification actually requires
+
+`src/email/inbound.ts` requires **all** of:
+
+1. **DMARC-authenticated sender.** Cloudflare Email Routing enforces
+   SPF/DKIM/DMARC before the handler runs. The envelope sender is checked
+   first, then the header `From` — the fallback is necessary because Cloudflare
+   rewrites the envelope sender of its own outbound mail to
+   `bounces@cf-bounce.<domain>`, and safe only because DMARC is precisely an
+   alignment check on the header `From` domain. Without that enforcement in
+   front, this fallback would be spoofable.
+2. **The sender is a registered player and a member of the bound campaign.**
+3. **The token authenticates the binding it resolves to** — a token edited to
+   name another player or an earlier tick no longer verifies, and is treated as
+   absent rather than as proof.
+4. **The binding's tick is current or the one just past** (replay defense); an
+   older reply bounces with a pointer to the current turn.
+
+A leaked or forwarded email alone therefore does not let a third party act as
+that player: they would also have to pass DMARC as that player's address.
+
+#### The two accepted weakenings, stated plainly
+
+- **Fresh mail from a player in exactly one campaign is accepted with no
+  token.** This is a deliberate product decision, not an oversight: "just email
+  us what you do" is the primary channel's whole appeal, and the sender is
+  already DMARC-authenticated and a known member. A player in several campaigns
+  gets no such guess and must reply to a beat.
+- **Tokens minted before this scheme, or while no secret was configured, cannot
+  be verified** and rest on the stored binding alone. Rejecting them would
+  invalidate every beat already sitting in someone's inbox; they age out with
+  their 90-day expiry.
+
+Each of spoofing, forwarding, replay, and ambiguity has a test in
+`test/integration/email-handler.test.ts`, and the token's own properties in
+`test/email/token.test.ts`.
 - Parsing: `postal-mime`, then quoted-reply stripping (`>` prefixes,
   `On … wrote:` lead-ins, `-- ` signature delimiter).
 - Threading: `In-Reply-To` / `References` keep a campaign as one mail thread.

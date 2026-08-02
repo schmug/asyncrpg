@@ -22,6 +22,7 @@ import {
   sameAddress,
   stripQuotedReply,
 } from "./parse";
+import { verifyReplyCode } from "./token";
 
 interface Binding {
   campaign_id: string;
@@ -29,7 +30,14 @@ interface Binding {
   tick: number;
 }
 
-/** Message-ID first, then subject code. Both are cheap indexed lookups. */
+/**
+ * Message-ID first, then subject code. Both are cheap indexed lookups.
+ *
+ * A code supplied by the sender must also authenticate the binding it found:
+ * it is an HMAC over the (campaign, player, tick) it claims, so a code that
+ * has been edited — to name an earlier tick, or another player — no longer
+ * verifies and is treated as absent rather than as proof.
+ */
 async function bindingFor(
   env: Env,
   messageIds: string[],
@@ -49,7 +57,16 @@ async function bindingFor(
     )
       .bind(code, Date.now())
       .first<Binding>();
-    if (row) return row;
+    if (
+      row &&
+      (await verifyReplyCode(env.EMAIL_TOKEN_SECRET, code, {
+        campaignId: row.campaign_id,
+        playerId: row.player_id,
+        tick: row.tick,
+      }))
+    ) {
+      return row;
+    }
   }
   return null;
 }

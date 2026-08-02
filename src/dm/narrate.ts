@@ -150,6 +150,27 @@ function factSheet(
 }
 
 /**
+ * Strip markup the model wrapped around its prose but did not mean as prose.
+ *
+ * Production shipped four beats ending in a bare ``` — the model closing a
+ * fence it had opened outside the JSON string, which every later stage happily
+ * carried into canon and onto the public chronicle. Fences are never legitimate
+ * here: this field is narrative prose, and no beat has any reason to contain a
+ * code block. Stripping is right rather than rejecting, because the prose
+ * around the stray fence is otherwise sound — throwing the beat away would
+ * replace good writing with templated text over a stray backtick.
+ */
+function stripFences(text: string): string {
+  return text
+    // A fence line, opened or closed, with or without a language tag.
+    .replace(/^[ \t]*`{3,}[a-z]*[ \t]*$/gim, "")
+    // A fence run left inline, most often jammed onto the final sentence.
+    .replace(/`{3,}/g, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+/**
  * Reject prose that is empty, absurdly long, or visibly mangled.
  *
  * The mangling check is a backstop behind the `stop_reason` guard: truncated
@@ -229,7 +250,13 @@ export async function narrateBeat(
       return { ...fallback, source: "templated", degradedReason: "no text block in response" };
     }
 
-    const parsed = JSON.parse(text.text) as { prose?: unknown; situation?: unknown };
+    const raw = JSON.parse(text.text) as { prose?: unknown; situation?: unknown };
+    // Normalize before validating, so `usable` judges the prose that will
+    // actually be stored rather than the prose plus its wrapper.
+    const parsed = {
+      prose: typeof raw.prose === "string" ? stripFences(raw.prose) : raw.prose,
+      situation: typeof raw.situation === "string" ? stripFences(raw.situation) : raw.situation,
+    };
     if (!usable(parsed.prose, parsed.situation)) {
       return { ...fallback, source: "templated", degradedReason: "model output failed validation" };
     }

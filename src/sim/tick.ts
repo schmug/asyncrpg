@@ -15,7 +15,7 @@
  * design cannot tolerate: it silently ends the game for everyone.
  */
 
-import { buildRecap, pickAutoAction, presenceFor } from "./character";
+import { buildRecap, pickAutoAction, presenceFor, restoreStanding } from "./character";
 import type { AbsenceConfig } from "./character";
 import { driftWorld } from "./drift";
 import { EventLog } from "./events";
@@ -126,6 +126,7 @@ export function runTick(
     if (acted) {
       if (wasPresence === "offscreen") {
         recaps[character.id] = buildRecap(opts.history ?? [], character.lastActedTick);
+        restoreStanding(state, character);
         log.add("character_returned", `${character.name} is back among the party.`, {
           actorId: character.id,
           significance: 55,

@@ -29,8 +29,14 @@
       <section id="view-signin" hidden>
         <h1>A tabletop campaign that waits for you</h1>
         <p class="lede">
-          Your group plays by email, at whatever pace suits. Miss a week and nothing bad happens —
-          no penalty, ever. The world keeps turning; you pick up where you left off.
+          Your group plays by email, at whatever pace suits. Miss a week and nothing is taken from
+          you — no stat loss, no lingering injury, no standing to fall behind on. Your character
+          steps offscreen and rests. When you come back you get a recap, and the party takes you
+          straight back in. The world keeps turning either way.
+        </p>
+        <p class="fine">
+          The one thing showing up buys is <em>story</em>: the people who played are the ones the
+          chronicle is about. That is the only difference, and it is on purpose.
         </p>
         <form id="signin-form" novalidate>
           <label for="email">Your email</label>
@@ -109,11 +115,39 @@
 
         <div id="c-clock" class="clock"></div>
         <p id="c-repair" class="status err" hidden></p>
+        <p id="c-maildown" class="status warn" hidden></p>
+        <div id="halt-box" hidden>
+          <p id="c-halted" class="status err"></p>
+          <button id="resume-btn" class="primary" type="button">Try this turn again</button>
+        </div>
 
         <section id="beat-box" hidden>
           <h2 id="beat-heading">The story so far</h2>
           <article id="beat" class="beat"></article>
         </section>
+
+        <details id="how-it-works">
+          <summary>How this works</summary>
+          <ol class="how">
+            <li>
+              <strong>Write what your character does</strong>, in plain language — "I follow the
+              tracks into the marsh", not a command. There is no syntax to learn.
+            </li>
+            <li>
+              <strong>Or just reply to the email.</strong> Every turn is sent to your inbox and
+              replying to it is exactly the same as typing here. You never have to open this page.
+            </li>
+            <li>
+              <strong>The turn resolves</strong> when enough of the group has acted, or when the
+              deadline passes — whichever comes first. You are never the one holding it up.
+            </li>
+            <li>
+              <strong>If you are busy, nothing bad happens.</strong> Your character acts in
+              character for a turn or two, then steps offscreen and rests. Come back whenever;
+              you get a recap and the party brings you back in level with everyone else.
+            </li>
+          </ol>
+        </details>
 
         <form id="action-form" novalidate>
           <label for="action" id="action-label">What do you do?</label>

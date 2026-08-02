@@ -158,6 +158,26 @@ button.primary[disabled] { opacity: 0.55; cursor: progress; }
 .status.err { color: #a3341f; }
 @media (prefers-color-scheme: dark) { .status.err { color: #f0917a; } }
 .status.ok { color: var(--ok); }
+/* Something needs saying but nothing is broken for the player — mail that did
+   not arrive while the turn itself is safely on the page. */
+.status.warn { color: #8a5a12; }
+@media (prefers-color-scheme: dark) { .status.warn { color: #e0b464; } }
+
+/* First-run orientation. Collapsed by default so it never gets between a
+   returning player and the thing they came to do. */
+#how-it-works { margin: 0 0 1.4rem; }
+#how-it-works > summary {
+  cursor: pointer;
+  font: 600 0.9rem/1.5 system-ui, sans-serif;
+  color: var(--accent);
+  padding: 0.6rem 0;
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+}
+ol.how { margin: 0.2rem 0 0.6rem; padding-left: 1.3rem; display: grid; gap: 0.6rem; }
+ol.how li { font-size: 0.92rem; line-height: 1.55; color: var(--muted); }
+ol.how strong { color: var(--ink); font-weight: 600; }
 
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.7rem; }
 .list li {

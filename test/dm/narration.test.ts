@@ -379,6 +379,49 @@ describe("narrateBeat degradation", () => {
     }
   });
 
+  it("strips a stray markdown fence instead of shipping it into canon", async () => {
+    const state = world();
+    const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);
+    const original = globalThis.fetch;
+    // Real corruption observed on the public chronicle: the model closed a
+    // fence it had opened outside the JSON string, and the backticks rode all
+    // the way through to the reader.
+    const fenced =
+      "Kestrel walked into the gap between the two lines and stood there, empty-handed, " +
+      "refusing every shout to move. Braemburgh's war paused because a traveller with " +
+      "reasons of their own wouldn't step aside.```";
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: JSON.stringify({ prose: fenced, situation: "war```" }) }],
+          usage: { input_tokens: 100, output_tokens: 200 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const beat = await narrateBeat(
+        { ...NO_KEY, apiKey: "sk-ant-test" },
+        state,
+        r.events,
+        r.resolutions,
+        UNLIMITED_BUDGET,
+      );
+      // The writing is sound; only the wrapper was wrong. Falling back to
+      // templated prose here would discard a good beat over three backticks.
+      expect(beat.source).toBe("model");
+      expect(beat.prose).not.toContain("`");
+      expect(beat.situation).not.toContain("`");
+      expect(beat.prose).toMatch(/wouldn't step aside\.$/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
   it("does not mistake ordinary prose for corruption", async () => {
     const state = world();
     const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);

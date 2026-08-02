@@ -115,7 +115,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const method = request.method.toUpperCase();
 
   if (path === "/api/health") {
-    return json({ ok: true, service: "asyncrpg", time: new Date().toISOString() });
+    return json({
+      ok: true,
+      service: "asyncrpg",
+      // "unknown" rather than an absent key: a deployment built without a
+      // revision and a deployment predating provenance are different problems.
+      revision: env.GIT_REVISION ?? "unknown",
+      time: new Date().toISOString(),
+    });
   }
 
   // ─── auth ──────────────────────────────────────────────────────────────
@@ -289,7 +296,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
-      const [snapshot, prompt, sheet, latest, openFailures] = await Promise.all([
+      const [snapshot, prompt, sheet, latest, openFailures, undelivered] = await Promise.all([
         campaignStub.snapshot(),
         campaignStub.promptForPlayer(session.playerId),
         campaignStub.mySheet(session.playerId),
@@ -303,6 +310,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         )
           .bind(campaign.id)
           .first<{ n: number }>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS n, MAX(tick) AS tick FROM delivery_failures
+           WHERE campaign_id = ? AND player_id = ? AND resolved_at IS NULL`,
+        )
+          .bind(campaign.id, session.playerId)
+          .first<{ n: number; tick: number | null }>(),
       ]);
       return json({
         campaign: { slug: campaign.slug, ...snapshot },
@@ -314,6 +327,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         // Surfaced to the host so a chronicle drifting from canon is visible
         // rather than something only a log would ever show.
         chronicleNeedsRepair: (openFailures?.n ?? 0) > 0,
+        // Told to the player it happened to, not just the logs: "I never got
+        // my email" should have an answer in the app. The beat itself is
+        // above in `latestBeat`, so the turn is not lost — only the nudge was.
+        mailUndelivered:
+          (undelivered?.n ?? 0) > 0 ? { count: undelivered!.n, tick: undelivered!.tick } : null,
       });
     }
 
@@ -429,6 +447,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         return fail(403, "only the host can rebuild the chronicle");
       }
       const out = await campaignStub.reproject();
+      return json({ ok: true, ...out });
+    }
+
+    if (action === "/resume" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can resume a halted campaign");
+      }
+      const out = await campaignStub.resume();
       return json({ ok: true, ...out });
     }
 

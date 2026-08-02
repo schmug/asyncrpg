@@ -71,6 +71,18 @@ footer{margin-top:3.5rem;padding-top:1.1rem;border-top:1px solid var(--rule);
   color:var(--muted);font-size:.82rem}
 a{color:var(--accent)}
 .empty{color:var(--muted);font-style:italic}
+.sofar-box{background:var(--card);border:1px solid var(--rule);border-radius:10px;
+  padding:.4rem 1.25rem 1.1rem;margin:0 0 2.4rem}
+.sofar-box h2{margin-top:1.4rem}
+.sofar-box p{margin:0 0 .7rem}
+ul.sofar{list-style:none;margin:0;padding:0}
+ul.sofar li{padding:.3rem 0;border-top:1px solid var(--rule)}
+ul.sofar .n{color:var(--muted);font:500 .72rem/1 system-ui,sans-serif;white-space:nowrap}
+.chapter{margin:0 0 2.2rem}
+h3.ch{font:600 1.06rem/1.3 Iowan Old Style,Palatino,Georgia,serif;margin:2rem 0 .9rem;
+  padding-bottom:.5rem;border-bottom:1px solid var(--rule)}
+h3.ch .ch-n{display:block;font:600 .68rem/1.6 system-ui,sans-serif;letter-spacing:.09em;
+  text-transform:uppercase;color:var(--accent)}
 `;
 
 const KIND_LABEL: Record<string, string> = {
@@ -81,6 +93,120 @@ const KIND_LABEL: Record<string, string> = {
   threat: "Troubles",
   character: "The party",
 };
+
+/**
+ * The orientation a reader needs before the turns start.
+ *
+ * Someone opening this months in — or for the first time — should be able to
+ * learn what this campaign is *about* without reading it end to end. Built
+ * from the projected facts rather than narrated, so it costs no inference and
+ * cannot contradict canon.
+ */
+function soFar(beats: BeatRow[], events: EventRow[], entities: EntityRow[]): string {
+  if (beats.length === 0) return "";
+
+  const cast = entities.filter((e) => e.kind === "character");
+  const ticks = beats.map((b) => b.tick);
+  const span = Math.max(...ticks) - Math.min(...ticks) + 1;
+
+  const biggest = [...events]
+    .filter((e) => e.significance >= 70)
+    .sort((a, b) => b.significance - a.significance || b.tick - a.tick)
+    .slice(0, 4);
+
+  const who =
+    cast.length === 0
+      ? ""
+      : `<p>It follows ${listOf(cast.map((c) => escapeHtml(c.name)))}.</p>`;
+
+  const what = biggest.length
+    ? `<p>What it has been about so far:</p><ul class="sofar">` +
+      biggest
+        .map((e) => `<li>${escapeHtml(chapterTitle(e.summary))} <span class="n">turn ${e.tick}</span></li>`)
+        .join("") +
+      `</ul>`
+    : `<p>Nothing has yet turned decisively one way or the other.</p>`;
+
+  return (
+    `<section class="sofar-box">` +
+    `<h2>So far</h2>` +
+    `<p>${span} turn${span === 1 ? "" : "s"} of play are recorded here, newest first.</p>` +
+    who +
+    what +
+    `</section>`
+  );
+}
+
+/** "a, b and c" — an Oxford-comma-free list, because this is prose. */
+function listOf(items: string[]): string {
+  if (items.length <= 1) return items[0] ?? "";
+  return `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+interface Chapter {
+  title: string;
+  span: string;
+  beats: BeatRow[];
+}
+
+/**
+ * Break a run of turns into named chapters.
+ *
+ * A chapter starts at a turn where something genuinely consequential happened
+ * — a faction going to war, a settlement changing hands — and runs until the
+ * next one. The defining event names it. Turns before the first such event
+ * become the opening chapter, because a campaign's quiet beginning is still
+ * part of the story and should not be filed under the first crisis.
+ *
+ * `beats` arrive newest-first and stay that way; only the grouping is derived.
+ */
+export function chapters(beats: BeatRow[], events: EventRow[]): Chapter[] {
+  if (beats.length === 0) return [];
+
+  // The most consequential event at each tick, for ticks that had a big one.
+  const defining = new Map<number, string>();
+  for (const e of events) {
+    if (e.significance < 75) continue;
+    const held = defining.get(e.tick);
+    if (!held) defining.set(e.tick, e.summary);
+  }
+
+  const out: Chapter[] = [];
+  let current: BeatRow[] = [];
+
+  const flush = (title: string): void => {
+    if (current.length === 0) return;
+    const ticks = current.map((b) => b.tick);
+    const lo = Math.min(...ticks);
+    const hi = Math.max(...ticks);
+    out.push({
+      title,
+      span: lo === hi ? `Turn ${lo}` : `Turns ${lo}–${hi}`,
+      beats: current,
+    });
+    current = [];
+  };
+
+  // Walking newest-first, a chapter *ends* (in reading order) at the turn that
+  // began it, so the boundary tick is the last one added before flushing.
+  for (const beat of beats) {
+    current.push(beat);
+    const title = defining.get(beat.tick);
+    if (title) flush(chapterTitle(title));
+  }
+  flush(out.length === 0 ? "The story so far" : "Before all that");
+
+  return out;
+}
+
+/** Trim an event summary into something that reads as a heading. */
+function chapterTitle(summary: string): string {
+  const text = summary.trim().replace(/\s+/g, " ").replace(/[.,;:]+$/, "");
+  // Event summaries often carry an outcome clause ("…, and it works"), which
+  // is narration rather than a title.
+  const cut = text.replace(/,\s+and (it|everything|half|the whole)\b.*$/i, "");
+  return (cut.length > 72 ? `${cut.slice(0, 69).trimEnd()}…` : cut) || "An eventful turn";
+}
 
 export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<Response> {
   const [beats, events, entities, journals, letters, history] = await Promise.all([
@@ -136,18 +262,34 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
   const eventRows = events.results ?? [];
   const entityRows = entities.results ?? [];
 
+  // Turns grouped into chapters, each named for the most consequential thing
+  // that happened inside it. An undifferentiated stack of numbered turns is a
+  // log; what makes a chronicle worth returning to months later is being able
+  // to find "the one where the Concern went to war" without reading forwards
+  // from the beginning.
   const beatHtml = beatRows.length
-    ? beatRows
+    ? chapters(beatRows, eventRows)
         .map(
-          (b) =>
-            `<article class="beat"><p class="t">Tick ${b.tick}` +
-            (b.source === "templated" ? `<span class="tag">recorded without narration</span>` : "") +
-            `</p>` +
-            b.prose
-              .split(/\n{2,}/)
-              .map((p) => `<p>${escapeHtml(p)}</p>`)
+          (chapter) =>
+            `<section class="chapter">` +
+            `<h3 class="ch"><span class="ch-n">${escapeHtml(chapter.span)}</span>` +
+            `${escapeHtml(chapter.title)}</h3>` +
+            chapter.beats
+              .map(
+                (b) =>
+                  `<article class="beat"><p class="t">Tick ${b.tick}` +
+                  (b.source === "templated"
+                    ? `<span class="tag">recorded without narration</span>`
+                    : "") +
+                  `</p>` +
+                  b.prose
+                    .split(/\n{2,}/)
+                    .map((p) => `<p>${escapeHtml(p)}</p>`)
+                    .join("") +
+                  `</article>`,
+              )
               .join("") +
-            `</article>`,
+            `</section>`,
         )
         .join("")
     : `<p class="empty">Nothing has happened yet. The first turn has not resolved.</p>`;
@@ -293,6 +435,7 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
     `<style>${CSS}</style></head><body><div class="wrap">` +
     `<header><h1>${escapeHtml(campaign.name)}</h1>` +
     `<p class="sub">A chronicle in ${beatRows.length} recorded turn${beatRows.length === 1 ? "" : "s"}.</p></header>` +
+    soFar(beatRows, eventRows, entityRows) +
     `<h2>Turns</h2>${beatHtml}` +
     `<h2>Turning points</h2>${timelineHtml}` +
     journalHtml +

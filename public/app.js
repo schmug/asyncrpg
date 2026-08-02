@@ -215,6 +215,29 @@ function renderCampaign(data) {
     ? "The public chronicle is behind the campaign. The host can rebuild it."
     : "";
 
+  // A halted campaign is stopped on purpose and can be restarted. Say both
+  // parts — "stopped" alone reads as data loss, which it is not.
+  const haltBox = $("halt-box");
+  haltBox.hidden = !c.halted;
+  if (c.halted) {
+    $("c-halted").textContent =
+      `This campaign has stopped advancing: the last ${c.halted.consecutiveBlockedTicks} turns ` +
+      `could not be resolved without breaking the world's own rules, so it stopped retrying ` +
+      `rather than failing quietly. Nothing has been lost — every earlier turn is intact. ` +
+      (data.isHost ? "You can clear the pending actions and try again." : "The host can restart it.");
+    $("resume-btn").hidden = !data.isHost;
+  }
+
+  // If mail did not reach this player, say so where they will see it, and say
+  // the reassuring part too: the turn is not lost, it is on this page.
+  const maildown = $("c-maildown");
+  maildown.hidden = !data.mailUndelivered;
+  maildown.textContent = data.mailUndelivered
+    ? `We could not deliver your email for turn ${data.mailUndelivered.tick}. ` +
+      `Nothing was missed — the turn is above, and you can act right here. ` +
+      `If this keeps happening, check your spam folder and add dm@cortech.online to your contacts.`
+    : "";
+
   // Letters go to other players, so the recipient list is everyone but you.
   const to = $("letter-to");
   to.textContent = "";
@@ -338,6 +361,19 @@ $("back").addEventListener("click", () => {
 });
 
 // ─── invitations ───────────────────────────────────────────────────────────
+
+$("resume-btn").addEventListener("click", async () => {
+  const button = $("resume-btn");
+  button.disabled = true;
+  try {
+    await api(`/api/campaigns/${encodeURIComponent(currentSlug)}/resume`, { method: "POST" });
+    await load();
+  } catch (err) {
+    $("c-halted").textContent = `Could not restart the campaign: ${err.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("invite-btn").addEventListener("click", async () => {
   const button = $("invite-btn");

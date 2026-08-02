@@ -88,6 +88,40 @@ export interface CampaignSnapshot {
     conditions: string[];
     hasPending: boolean;
   }[];
+  /**
+   * Set when the campaign has stopped scheduling ticks because the same tick
+   * kept failing its invariants. Recoverable by the host via `resume()`.
+   */
+  halted: { since: number; consecutiveBlockedTicks: number; violations: string[] } | null;
+}
+
+/**
+ * How many consecutive invariant-rejected ticks before the campaign stops
+ * scheduling and asks for a human.
+ *
+ * More than one, because clearing the pending queue genuinely does fix the
+ * player-input case and it would be rude to halt a campaign over a single bad
+ * submission. Small, because every retry past the first is the same
+ * computation producing the same failure.
+ */
+const BLOCKED_TICK_LIMIT = 3;
+
+/**
+ * What to do after a tick, given how many consecutive ticks have been rejected.
+ *
+ * Pulled out as a pure function because the property that matters — a
+ * repeating deterministic failure eventually stops rescheduling instead of
+ * looping forever — is otherwise only observable by waiting for an alarm that
+ * never ends.
+ */
+export function blockedTickPolicy(
+  previousRuns: number,
+  outcome: "blocked" | "resolved",
+): { runs: number; reschedule: boolean; halted: boolean } {
+  if (outcome === "resolved") return { runs: 0, reschedule: true, halted: false };
+  const runs = previousRuns + 1;
+  const halted = runs >= BLOCKED_TICK_LIMIT;
+  return { runs, reschedule: !halted, halted };
 }
 
 export class CampaignDO extends DurableObject<Env> {
@@ -451,6 +485,18 @@ export class CampaignDO extends DurableObject<Env> {
       this.#put("world", before);
       this.ctx.storage.sql.exec("DELETE FROM pending");
 
+      // Clearing pending changes the inputs, so a violation caused by player
+      // actions will not recur. A violation caused by deterministic world
+      // drift will: same state, same drift, same rejection, on every alarm
+      // forever — a campaign that looks alive and never moves.
+      //
+      // So count consecutive rejections. After a few, stop rescheduling and
+      // say so out loud. A halted campaign is a bad state; a campaign quietly
+      // failing the same tick until someone notices is a worse one.
+      const policy = blockedTickPolicy(this.#get<number>("blockedRuns") ?? 0, "blocked");
+      this.#put("blockedRuns", policy.runs);
+      this.#put("blockedDetail", violations.slice(0, 5));
+
       // Canon does not advance, but the record of it must. A turn that
       // silently does nothing is indistinguishable from an outage to the
       // group, and to anyone debugging it later.
@@ -474,7 +520,17 @@ export class CampaignDO extends DurableObject<Env> {
         await this.#recordProjectionFailure(before.campaignId, before.tick, "blocked-beat", err);
       }
 
-      await this.#scheduleNextTick();
+      if (policy.reschedule) {
+        await this.#scheduleNextTick();
+      } else {
+        // Explicitly halted, not silently looping. `resume()` is the way out,
+        // and the snapshot says so to the host.
+        this.#put("haltedAt", Date.now());
+        console.error(
+          `campaign ${before.campaignId} halted after ${policy.runs} consecutive blocked ticks`,
+        );
+      }
+
       return {
         tick: before.tick,
         source: "blocked",
@@ -482,6 +538,13 @@ export class CampaignDO extends DurableObject<Env> {
         drifted: [],
         reason,
       };
+    }
+
+    // A tick got through: the campaign is not in a repeating failure.
+    if ((this.#get<number>("blockedRuns") ?? 0) > 0) {
+      this.#put("blockedRuns", 0);
+      this.#put("blockedDetail", []);
+      this.#put("haltedAt", null);
     }
 
     pruneWorld(result.state);
@@ -571,7 +634,7 @@ export class CampaignDO extends DurableObject<Env> {
         (r) => r.action.characterId === character.id && r.action.auto,
       );
 
-      await sendBeat(this.env, {
+      const sent = await sendBeat(this.env, {
         campaignId: state.campaignId,
         campaignSlug: meta.slug,
         campaignName: meta.name,
@@ -584,6 +647,47 @@ export class CampaignDO extends DurableObject<Env> {
         recap: result.recaps[character.id],
         actedForYou: auto ? auto.action.intent : null,
       });
+
+      // A beat that did not reach its player is a lost turn on the primary
+      // channel. Record it against that player so the app can tell them
+      // plainly, and clear the moment a later beat gets through.
+      await this.#recordDelivery(state.campaignId, member.player_id, state.tick, sent !== null);
+    }
+  }
+
+  async #recordDelivery(
+    campaignId: string,
+    playerId: string,
+    tick: number,
+    delivered: boolean,
+  ): Promise<void> {
+    try {
+      if (delivered) {
+        await this.env.DB.prepare(
+          `UPDATE delivery_failures SET resolved_at = ?
+           WHERE campaign_id = ? AND player_id = ? AND resolved_at IS NULL`,
+        )
+          .bind(new Date().toISOString(), campaignId, playerId)
+          .run();
+        return;
+      }
+      await this.env.DB.prepare(
+        `INSERT INTO delivery_failures (id, campaign_id, player_id, tick, kind, detail, created_at)
+         VALUES (?, ?, ?, ?, 'beat', ?, ?)`,
+      )
+        .bind(
+          `dlv_${campaignId}_${playerId}_${tick}`,
+          campaignId,
+          playerId,
+          tick,
+          "send failed after retry",
+          new Date().toISOString(),
+        )
+        .run();
+    } catch (err) {
+      // Bookkeeping about a failure must never become a second failure that
+      // stops the fan-out; the remaining players still need their beat.
+      console.error("delivery bookkeeping failed", err);
     }
   }
 
@@ -719,7 +823,35 @@ export class CampaignDO extends DurableObject<Env> {
         conditions: c.conditions,
         hasPending: pendingIds.has(c.playerId),
       })),
+      halted: this.#haltState(),
     };
+  }
+
+  #haltState(): CampaignSnapshot["halted"] {
+    const since = this.#get<number>("haltedAt");
+    if (!since) return null;
+    return {
+      since,
+      consecutiveBlockedTicks: this.#get<number>("blockedRuns") ?? 0,
+      violations: this.#get<string[]>("blockedDetail") ?? [],
+    };
+  }
+
+  /**
+   * Take a halted campaign off the bench.
+   *
+   * Deliberately not automatic. The counter exists because retrying was not
+   * working, so the only honest resume is one a person asked for after looking
+   * at the violations.
+   */
+  async resume(): Promise<{ resumed: boolean; wasHalted: boolean }> {
+    const wasHalted = Boolean(this.#get<number>("haltedAt"));
+    this.#put("blockedRuns", 0);
+    this.#put("blockedDetail", []);
+    this.#put("haltedAt", null);
+    this.ctx.storage.sql.exec("DELETE FROM pending");
+    await this.#scheduleNextTick();
+    return { resumed: true, wasHalted };
   }
 
   /**

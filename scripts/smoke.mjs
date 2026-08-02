@@ -16,6 +16,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { resolveMx, resolveTxt } from "node:dns/promises";
 
 const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
 const KEEP = process.argv.includes("--keep");
@@ -121,6 +122,12 @@ async function main() {
   console.log("unauthenticated:");
   const health = await req("/api/health");
   check("health returns 200 ok", health.status === 200 && health.json?.ok === true);
+  // Provenance: without this, "the revision I reviewed" and "the deployment I
+  // measured" are two unverifiable claims that cycle 1 got wrong.
+  check(
+    "health names the revision the deployment was built from",
+    /^[0-9a-f]{40}$/.test(health.json?.revision ?? ""),
+  );
 
   const shell = await req("/");
   check("app shell serves HTML", shell.status === 200 && shell.text.includes("<html"));
@@ -129,11 +136,95 @@ async function main() {
     /name="viewport"[^>]*width=device-width/.test(shell.text),
   );
 
+  // ─── security-header drift ───────────────────────────────────────────
+  //
+  // The app sets these; the Cloudflare zone can override them on the way out,
+  // and twice now a critic has reasonably read the difference as the app
+  // lying about its own policy. So: assert what the app intends, and where the
+  // edge changes it, name the deviation explicitly. An *undocumented* drift
+  // fails the gate; a known one passes loudly, so it stays visible instead of
+  // being normalized into background noise. See docs/DEPLOYMENT.md.
+  const ZONE_DEVIATIONS = {
+    "strict-transport-security": {
+      intended: "max-age=31536000; includeSubDomains",
+      served: "max-age=0",
+      why: "HSTS is disabled at the cortech.online zone; the zone setting wins over the app header.",
+      owner: "domain owner — enable HSTS in SSL/TLS → Edge Certificates",
+    },
+  };
+  for (const [header, d] of Object.entries(ZONE_DEVIATIONS)) {
+    const live = health.headers.get(header) ?? "(absent)";
+    if (live === d.intended) {
+      check(`${header} matches intended policy`, true, "zone override no longer applies");
+    } else {
+      check(
+        `${header} drift is the known, documented one`,
+        live === d.served,
+        live === d.served
+          ? `serving "${live}", app intends "${d.intended}" — ${d.owner}`
+          : `UNDOCUMENTED drift: serving "${live}", expected either the intended ` +
+            `"${d.intended}" or the known override "${d.served}"`,
+      );
+    }
+  }
+
   const csp = health.headers.get("content-security-policy") ?? "";
   check("CSP is set and blocks framing", csp.includes("frame-ancestors 'none'"));
   check("CSP does not allow inline script", !/script-src[^;]*unsafe-inline/.test(csp));
   check("nosniff is set", health.headers.get("x-content-type-options") === "nosniff");
 
+  // ─── email authentication ────────────────────────────────────────────
+  //
+  // Whether Gmail or Outlook drops a beat into spam cannot be measured from
+  // here. What *can* be measured is whether we have given them any reason to:
+  // SPF, DMARC, and inbound MX are the records every receiver checks first,
+  // and a silent regression in them would degrade the product's primary
+  // channel without a single request failing.
+  const MAIL_DOMAIN = "cortech.online";
+  console.log("\nemail authentication:");
+  try {
+    const txt = (await resolveTxt(MAIL_DOMAIN)).map((r) => r.join(""));
+    const spf = txt.find((r) => r.startsWith("v=spf1"));
+    check("SPF record exists", Boolean(spf), spf ?? "none found");
+    check(
+      "SPF authorizes Cloudflare Email Sending",
+      Boolean(spf && spf.includes("_spf.mx.cloudflare.net")),
+      spf ?? "",
+    );
+    check(
+      "SPF ends in a restrictive all",
+      Boolean(spf && /[-~]all\s*$/.test(spf)),
+      "+all would authorize the whole internet to send as this domain",
+    );
+  } catch (err) {
+    check("SPF record is resolvable", false, err.message);
+  }
+
+  try {
+    const dmarc = (await resolveTxt(`_dmarc.${MAIL_DOMAIN}`))
+      .map((r) => r.join(""))
+      .find((r) => r.startsWith("v=DMARC1"));
+    check("DMARC record exists", Boolean(dmarc), dmarc ?? "none found");
+    // Inbound reply authentication leans on Email Routing enforcing DMARC
+    // before the handler runs, so a missing policy is a security fact, not
+    // just a deliverability one.
+    check("DMARC declares a policy", Boolean(dmarc && /\bp=(none|quarantine|reject)\b/.test(dmarc)));
+  } catch (err) {
+    check("DMARC record is resolvable", false, err.message);
+  }
+
+  try {
+    const mx = await resolveMx(MAIL_DOMAIN);
+    check(
+      "MX points at Cloudflare Email Routing",
+      mx.some((r) => /mx\.cloudflare\.net$/.test(r.exchange)),
+      mx.map((r) => r.exchange).join(", ") || "none",
+    );
+  } catch (err) {
+    check("MX records are resolvable", false, err.message);
+  }
+
+  console.log("\nunauthenticated surface (continued):");
   const meAnon = await req("/api/me");
   check(
     "/api/me answers anonymously without erroring",

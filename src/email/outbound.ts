@@ -8,9 +8,9 @@
  *      the HTML part. Narrative prose is untrusted content by definition.
  */
 
-import { shortCode } from "../auth";
 import type { Env } from "../env";
 import { buildSubject, INBOX_LOCAL } from "./parse";
+import { mintReplyCode } from "./token";
 
 export function escapeHtml(value: string): string {
   return value
@@ -54,7 +54,13 @@ export interface BeatMail {
  */
 export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string } | null> {
   const domain = env.MAIL_DOMAIN;
-  const code = shortCode();
+  // The reply capability for exactly this (campaign, player, tick). See
+  // ./token.ts for why it rides the subject line rather than the Reply-To.
+  const code = await mintReplyCode(env.EMAIL_TOKEN_SECRET, {
+    campaignId: mail.campaignId,
+    playerId: mail.playerId,
+    tick: mail.tick,
+  });
   const id = messageId(domain);
   const replyTo = `${INBOX_LOCAL}@${domain}`;
   const subject = buildSubject(mail.campaignName, mail.tick, code, mail.headline);

@@ -6,7 +6,7 @@
   "description": "Asynchronous multiplayer tabletop RPG with a simulated world and an LLM dungeon master. Play by email or web.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --var GIT_REVISION:$(git rev-parse HEAD)",
     "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
