@@ -17,9 +17,9 @@ const beat = (tick: number) => ({
   created_at: "2026-08-02T00:00:00Z",
 });
 
-const event = (tick: number, summary: string, significance: number) => ({
+const event = (tick: number, summary: string, significance: number, kind = "faction_war") => ({
   tick,
-  kind: "faction_war",
+  kind,
   summary,
   significance,
 });
@@ -90,5 +90,26 @@ describe("chapters", () => {
       [event(2, "The city fell", 95), event(2, "A rival rose", 90)],
     );
     expect(out[0]!.title).toBe("The city fell");
+  });
+
+  it("names a chapter for what the world did, not for a well-rolled errand", () => {
+    // A routine action that rolls well clears the significance bar easily, and
+    // "Bram checked the stores" is a good turn, not an era.
+    const out = chapters(
+      [2, 1].map(beat),
+      [
+        event(2, "Bram Ashfoot checks the stores and counts what remains", 90, "player_action"),
+        event(2, "Traernstead threw out its rulers", 80, "settlement_uprising"),
+      ],
+    );
+    expect(out[0]!.title).toBe("Traernstead threw out its rulers");
+  });
+
+  it("still uses a player action when that is all the turn had", () => {
+    const out = chapters(
+      [2, 1].map(beat),
+      [event(2, "Kestrel Vane stands between them and refuses to move", 88, "player_action")],
+    );
+    expect(out[0]!.title).toBe("Kestrel Vane stands between them and refuses to move");
   });
 });

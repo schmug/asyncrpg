@@ -164,11 +164,17 @@ export function chapters(beats: BeatRow[], events: EventRow[]): Chapter[] {
   if (beats.length === 0) return [];
 
   // The most consequential event at each tick, for ticks that had a big one.
-  const defining = new Map<number, string>();
+  //
+  // World events beat player actions at the same tick, even when the action
+  // scored higher. "The Concern went to war" is what a chapter is about;
+  // "Bram checked the stores, and it went well" is a good turn, not an era —
+  // and a well-rolled routine action clears the significance bar easily.
+  const RANK = (kind: string): number => (kind === "player_action" ? 0 : 1);
+  const defining = new Map<number, EventRow>();
   for (const e of events) {
     if (e.significance < 75) continue;
     const held = defining.get(e.tick);
-    if (!held) defining.set(e.tick, e.summary);
+    if (!held || RANK(e.kind) > RANK(held.kind)) defining.set(e.tick, e);
   }
 
   const out: Chapter[] = [];
@@ -191,8 +197,8 @@ export function chapters(beats: BeatRow[], events: EventRow[]): Chapter[] {
   // began it, so the boundary tick is the last one added before flushing.
   for (const beat of beats) {
     current.push(beat);
-    const title = defining.get(beat.tick);
-    if (title) flush(chapterTitle(title));
+    const defined = defining.get(beat.tick);
+    if (defined) flush(chapterTitle(defined.summary));
   }
   flush(out.length === 0 ? "The story so far" : "Before all that");
 
