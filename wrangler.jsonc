@@ -37,8 +37,11 @@
     "MAIL_DOMAIN": "play.cortech.online",
     "PUBLIC_ORIGIN": "https://play.cortech.online",
     // Narration model tiers. Overridden per-environment if needed.
+    // Sonnet 5 writes the beat players read; Haiku 4.5 does the cheap
+    // high-volume work (intent parsing, recaps). Note Haiku 4.5 does not
+    // support `output_config.effort` — never send it on the cheap tier.
     "MODEL_NARRATE": "claude-sonnet-5",
-    "MODEL_CHEAP": "claude-haiku-4-5-20251001",
+    "MODEL_CHEAP": "claude-haiku-4-5",
     // Monthly per-campaign output-token budget. Exceeding it degrades
     // narration to templated sim prose; it never blocks a tick.
     "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000"

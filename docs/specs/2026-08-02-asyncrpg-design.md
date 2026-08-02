@@ -35,9 +35,22 @@ The LLM has exactly two jobs, both schema-bounded:
 1. **Intent parsing** — free text → typed `PlayerAction`.
 2. **Narration** — resolved `WorldEvent[]` + state → prose.
 
-Any state delta the model proposes is validated against sim rules and
-**rejected if illegal**. The model cannot invent a faction, resurrect a dead
-NPC, or teleport a party.
+> **Implementation note (2026-08-02):** this section originally specified that
+> state deltas proposed by the model would be validated against sim rules and
+> rejected if illegal. The implementation is stronger: **there is no delta
+> channel at all.** The narrator returns prose and a bounded one-line scene
+> description, and nothing else it produces is ever written to world state.
+> There is no illegal write to catch because there is no write. What the model
+> says happened and what the sim recorded cannot diverge, because the sim is
+> what it was told.
+>
+> The intent parser is the only path by which model output influences state,
+> and it is doubly constrained: the verb must be in a fixed enum, and the
+> target must resolve to an entity that already exists (dead NPCs, razed
+> settlements, and unrevealed threats deliberately do not resolve). An
+> invented name yields an action with no target, never a new entity.
+
+The model cannot invent a faction, resurrect a dead NPC, or teleport a party.
 
 This is what makes months-long coherence possible: the baron the party snubbed
 in tick 3 is a row with an agenda and a grudge value, not a sentence in a
