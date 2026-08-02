@@ -1,0 +1,11 @@
+{
+  // Scripts run under Node (tsx), not workerd, so they get Node types instead
+  // of Workers types. Keeping them in a separate project stops `process` and
+  // friends from leaking into `src/`, where they do not exist at runtime.
+  "extends": "../tsconfig.json",
+  "compilerOptions": {
+    "types": ["node"],
+    "lib": ["ES2023"]
+  },
+  "include": ["./**/*.ts", "../src/sim/**/*.ts"]
+}

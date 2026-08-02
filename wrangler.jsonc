@@ -1,0 +1,51 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "asyncrpg",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-01",
+  "compatibility_flags": ["nodejs_compat"],
+
+  "observability": { "enabled": true },
+
+  "assets": {
+    "directory": "./public",
+    "binding": "ASSETS"
+  },
+
+  "durable_objects": {
+    "bindings": [{ "name": "CAMPAIGN", "class_name": "CampaignDO" }]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CampaignDO"]
+    }
+  ],
+
+  "d1_databases": [
+    {
+      "binding": "DB",
+      "database_name": "asyncrpg",
+      "database_id": "2f67e65f-cff8-4a16-8167-494b2581ab4f",
+      "migrations_dir": "migrations"
+    }
+  ],
+
+  "send_email": [{ "name": "EMAIL" }],
+
+  "vars": {
+    "MAIL_DOMAIN": "play.cortech.online",
+    "PUBLIC_ORIGIN": "https://play.cortech.online",
+    // Narration model tiers. Overridden per-environment if needed.
+    "MODEL_NARRATE": "claude-sonnet-5",
+    "MODEL_CHEAP": "claude-haiku-4-5-20251001",
+    // Monthly per-campaign output-token budget. Exceeding it degrades
+    // narration to templated sim prose; it never blocks a tick.
+    "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000"
+  }
+
+  // Secrets (set via `wrangler secret put`, never committed):
+  //   ANTHROPIC_API_KEY   — DM narration; absent ⇒ templated sim prose
+  //   EMAIL_TOKEN_SECRET  — HMAC key for reply subaddress tokens
+  //   AUTH_TOKEN_SECRET   — HMAC key for magic-link sessions
+}
