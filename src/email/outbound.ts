@@ -191,7 +191,11 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   return { ok: true, code };
 }
 
-export async function sendMagicLink(env: Env, toEmail: string, token: string): Promise<boolean> {
+export async function sendMagicLink(
+  env: Env,
+  toEmail: string,
+  token: string,
+): Promise<{ ok: true } | { ok: false; error: string }> {
   const url = `${env.PUBLIC_ORIGIN}/auth/callback?t=${encodeURIComponent(token)}`;
   try {
     await env.EMAIL.send({
@@ -205,7 +209,7 @@ export async function sendMagicLink(env: Env, toEmail: string, token: string): P
         `<p style="color:#6b6459;font-size:.9em">This link works once and expires in 20 minutes. ` +
         `If you didn't ask for it, ignore this email.</p></div>`,
     });
-    return true;
+    return { ok: true };
   } catch (err) {
     // This used to be a bare `catch { return false }`, and that made the one
     // path a brand-new user depends on the only one that could fail in total
@@ -221,6 +225,6 @@ export async function sendMagicLink(env: Env, toEmail: string, token: string): P
       `magic link send failed for ${toEmail.replace(/^(.).*(@.*)$/, "$1***$2")}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return false;
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

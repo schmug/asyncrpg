@@ -147,7 +147,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
             // tailing the Worker at the exact moment. A row survives the
             // moment. `campaign_id` is empty because sign-in precedes any
             // campaign — this is an account-level delivery failure.
-            if (!sent) {
+            if (!sent.ok) {
               await env.DB.prepare(
                 `INSERT OR REPLACE INTO delivery_failures
                    (id, campaign_id, player_id, tick, kind, detail, created_at)
@@ -156,7 +156,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
                 .bind(
                   `dlv_signin_${playerId}`,
                   playerId,
-                  "sign-in link send failed",
+                  sent.error.slice(0, 300),
                   new Date().toISOString(),
                 )
                 .run();
