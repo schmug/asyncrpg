@@ -147,7 +147,10 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
             // tailing the Worker at the exact moment. A row survives the
             // moment. `campaign_id` is empty because sign-in precedes any
             // campaign — this is an account-level delivery failure.
-            if (!sent.ok) {
+            // Suppressed is not failed: the address is reserved and could
+            // never have received anything. Recording it would fill the table
+            // with the rate-limit probe's own traffic and bury real outages.
+            if (!sent.ok && !sent.suppressed) {
               await env.DB.prepare(
                 `INSERT OR REPLACE INTO delivery_failures
                    (id, campaign_id, player_id, tick, kind, detail, created_at)

@@ -214,13 +214,13 @@ export async function sendMagicLink(
   env: Env,
   toEmail: string,
   token: string,
-): Promise<{ ok: true } | { ok: false; error: string }> {
+): Promise<{ ok: true } | { ok: false; error: string; suppressed?: true }> {
   const url = `${env.PUBLIC_ORIGIN}/auth/callback?t=${encodeURIComponent(token)}`;
   if (isUndeliverable(toEmail)) {
     // Same guard as the beat path. A sign-in attempt at a reserved domain is
     // almost always a typo or a test, and either way it is a certain bounce.
     console.log("magic link suppressed for an address that cannot receive mail");
-    return { ok: false, error: "address cannot receive mail" };
+    return { ok: false, error: "address cannot receive mail", suppressed: true };
   }
   try {
     await env.EMAIL.send({
