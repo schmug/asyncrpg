@@ -206,7 +206,21 @@ export async function sendMagicLink(env: Env, toEmail: string, token: string): P
         `If you didn't ask for it, ignore this email.</p></div>`,
     });
     return true;
-  } catch {
+  } catch (err) {
+    // This used to be a bare `catch { return false }`, and that made the one
+    // path a brand-new user depends on the only one that could fail in total
+    // silence. `/api/auth/request` deliberately answers 200 whatever happens,
+    // so nobody can use it to discover which addresses have accounts — which
+    // means a swallowed error here is invisible from both ends at once: the
+    // person sees "a link is on its way" and the operator sees a clean 200.
+    //
+    // Reported for real on 2026-08-03: a sign-in that produced no email and no
+    // log line anywhere. Anti-enumeration is about what the *response* says,
+    // not about what we are allowed to know.
+    console.error(
+      `magic link send failed for ${toEmail.replace(/^(.).*(@.*)$/, "$1***$2")}:`,
+      err instanceof Error ? err.message : String(err),
+    );
     return false;
   }
 }

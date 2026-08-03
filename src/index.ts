@@ -139,7 +139,32 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (email) {
       const playerId = await findOrCreatePlayer(env, email);
       const token = await mintLoginToken(env, playerId);
-      ctx.waitUntil(sendMagicLink(env, email, token).then(() => purgeExpiredTokens(env)));
+      ctx.waitUntil(
+        sendMagicLink(env, email, token)
+          .then(async (sent) => {
+            // Durable, not just a log line: an operator asked "why did my
+            // sign-in email never arrive?" and the honest answer required
+            // tailing the Worker at the exact moment. A row survives the
+            // moment. `campaign_id` is empty because sign-in precedes any
+            // campaign — this is an account-level delivery failure.
+            if (!sent) {
+              await env.DB.prepare(
+                `INSERT OR REPLACE INTO delivery_failures
+                   (id, campaign_id, player_id, tick, kind, detail, created_at)
+                 VALUES (?, '', ?, 0, 'signin', ?, ?)`,
+              )
+                .bind(
+                  `dlv_signin_${playerId}`,
+                  playerId,
+                  "sign-in link send failed",
+                  new Date().toISOString(),
+                )
+                .run();
+            }
+          })
+          .catch((err) => console.error("sign-in bookkeeping failed", err))
+          .then(() => purgeExpiredTokens(env)),
+      );
     }
     return json({ ok: true, message: "If that address can sign in, a link is on its way." });
   }
