@@ -9,7 +9,7 @@
  */
 
 import type { Env } from "../env";
-import { buildSubject, INBOX_LOCAL } from "./parse";
+import { buildSubject, INBOX_LOCAL, isUndeliverable } from "./parse";
 import { mintReplyCode } from "./token";
 
 export function escapeHtml(value: string): string {
@@ -53,7 +53,11 @@ export interface BeatMail {
  * resolve without them doing anything but hitting reply.
  */
 /** Why a beat did or did not reach its player — the reason matters downstream. */
-export type SendResult = { ok: true; code: string } | { ok: false; error: string };
+export type SendResult =
+  | { ok: true; code: string }
+  | { ok: false; error: string }
+  /** Not attempted: the address provably cannot receive mail. Not a failure. */
+  | { ok: false; suppressed: true; code: string; error: string };
 
 export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   const domain = env.MAIL_DOMAIN;
@@ -104,11 +108,22 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   let assignedMessageId: string | null = null;
   let lastError: unknown = null;
 
+  // Never hand a guaranteed hard bounce to the provider. The binding is still
+  // written below — reply authentication is about identity, not delivery, and
+  // a suppressed send should not silently disable the reply path for a test
+  // campaign or leave a gap the smoke suite reads as a regression.
+  const suppressed = isUndeliverable(mail.toEmail);
+  if (suppressed) {
+    console.log(
+      `send suppressed for undeliverable address campaign=${mail.campaignId} tick=${mail.tick}`,
+    );
+  }
+
   // One retry. Most send failures are transient (rate limit, upstream blip),
   // and the beat is the product's primary channel — dropping it on the first
   // stumble loses a player their turn. A second failure is logged and the
   // player still has the web copy.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 2 && !suppressed; attempt++) {
   try {
     // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
     // ("Only whitelisted headers and X-* headers are accepted"), so the
@@ -186,9 +201,13 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
       `reply binding insert failed campaign=${mail.campaignId} tick=${mail.tick}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { ok: true, code };
+    return suppressed
+      ? { ok: false, suppressed: true, code, error: "address cannot receive mail" }
+      : { ok: true, code };
   }
-  return { ok: true, code };
+  return suppressed
+    ? { ok: false, suppressed: true, code, error: "address cannot receive mail" }
+    : { ok: true, code };
 }
 
 export async function sendMagicLink(
@@ -197,6 +216,12 @@ export async function sendMagicLink(
   token: string,
 ): Promise<{ ok: true } | { ok: false; error: string }> {
   const url = `${env.PUBLIC_ORIGIN}/auth/callback?t=${encodeURIComponent(token)}`;
+  if (isUndeliverable(toEmail)) {
+    // Same guard as the beat path. A sign-in attempt at a reserved domain is
+    // almost always a typo or a test, and either way it is a certain bounce.
+    console.log("magic link suppressed for an address that cannot receive mail");
+    return { ok: false, error: "address cannot receive mail" };
+  }
   try {
     await env.EMAIL.send({
       to: toEmail,

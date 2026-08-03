@@ -747,7 +747,10 @@ export class CampaignDO extends DurableObject<Env> {
         state.campaignId,
         member.player_id,
         state.tick,
-        sent.ok ? null : sent.error,
+        // A suppressed send is not a delivery failure — nothing is wrong and
+        // nothing needs an operator. Recording it as one would bury real
+        // outages under test traffic.
+        sent.ok || "suppressed" in sent ? null : sent.error,
       );
     }
   }
