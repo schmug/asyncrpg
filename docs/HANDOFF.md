@@ -20,7 +20,11 @@ cycles**, cap 12 cycles. Check-ins: first deploy (done) and completion.
 | 1 | 6 | 7 | 7 | 6 | 6 | fail |
 | 2 | 7 | 6 | 6 | 6 | 7 | fail |
 | 3 | 7 | 7 | 6 | 7 | 6 | fail |
-| 4 | — | — | — | — | — | running |
+| 4 | 7 | 8 | 7 | 7 | 6 | fail |
+| 5 | 8 | 8 | 7 | 7 | 7 | fail |
+| 6 | 7 | 7 | 7 | 7 | 7 | fail |
+| 7 | 7 | 7 | 8 | 7 | 8 | fail |
+| 8 | — | — | — | — | — | blocked on send quota |
 
 Reports are committed in `critic-reports/`. Every cycle-3 finding is landed,
 deployed, and verified live.
@@ -28,8 +32,14 @@ deployed, and verified live.
 ```bash
 npm run deploy                                                    # injects the revision
 node scripts/seed-demo.mjs https://play.cortech.online --ticks 6   # fresh prose to judge
-node scripts/critic.mjs 04
+node scripts/critic.mjs 08
 ```
+
+**Seeding costs email.** Every tick mails every member, and Cloudflare's
+sending quota is **account-wide and daily**. A 32-tick seed exhausted it on
+2026-08-02 and broke all outbound mail — beats and sign-in links — until it
+reset. `seed-demo` now prints its estimated cost. Do not seed a long chronicle
+and then run the critic on the same day without checking `email-e2e` first.
 
 **Commit and deploy before running the critic.** This is not advice, it is the
 thing that cost cycle 3 a blocker: the gates and evidence commands in
@@ -47,10 +57,11 @@ background and read `critic-reports/cycle-03.json`.
 
 | Command | Result |
 |---|---|
-| `npm test` | 226 passing |
+| `npm test` | 254 passing |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | invariants hold, replay identical, economy and state size bounded |
-| `node scripts/smoke.mjs <url>` | 75/75, mostly adversarial |
+| `npm run sim:endurance` | 4 players, 60 ticks, quorum + deadline, absences of 1/3/30, the promise asserted every turn |
+| `node scripts/smoke.mjs <url>` | 84/84, mostly adversarial |
 | `node scripts/ui-smoke.mjs <url>` | 34/34, mobile viewport, SWs blocked |
 | `node scripts/email-e2e.mjs <url>` | 22/22, including the real two-zone round trip |
 
@@ -64,9 +75,46 @@ exhausting it, and the limiter keys on IP. It now waits for the window to roll
 over before exiting — without that, `ui-smoke` runs next, gets a 429 on
 sign-in, and reports it as a console error.
 
-## What cycle 4 addressed (landed, deployed, verified live)
+## What cycles 4–7 addressed
 
-Cycle 3 scored 7/7/6/7/6 with 10 required fixes. All ten are done.
+Every finding from cycles 3, 4, 5, 6 and 7 is landed, deployed and verified
+live. The most consequential, in order of how much they changed:
+
+- **Downtime bought a mechanical edge (cycle 7 blocker).** `train` raised
+  renown; `network` moved a character's bond *and* the NPC's reciprocal
+  attitude. All three feed `difficultyFor`, so an optional activity was an
+  advantage — which makes skipping it a cost. `restoreStanding` could never
+  undo the NPC's half, so a missed month was permanent. Two tests actively
+  blessed this; both rewritten, plus a general one that no downtime activity
+  moves attributes, skills, renown, bonds, or attitudes. Downtime now yields
+  story only. `research` still reveals threats (information the whole table
+  gets) and `recover` still clears conditions (removing a minus).
+- **Four separate prose-corruption classes** reached the public chronicle, one
+  per cycle, each found by the critic rather than by the gates:
+  `finished.732`, `evening.ot. of it.was`, `it does.MjM`, and
+  `came for.// wait, remove that fragment.` They are now one named list,
+  `ARTIFACT_PATTERNS` in `src/dm/narrate.ts`, mirrored in `scripts/smoke.mjs`
+  so the *live* chronicle is checked too, with `test/dm/artifact-parity.test.ts`
+  failing if the mirror drifts.
+- **The chronicle rendered only the latest 25 turns**, so an active campaign
+  lost public access to its own history within weeks. Now paged with
+  `?before=<tick>`, plain anchors, no-JS intact.
+- **Absence was socially unequal.** `restoreStanding()` lifts a returning
+  player to the party *median* — never past it — on any return from absence.
+- **Blocked ticks could loop forever**; a campaign now halts visibly after
+  three consecutive invariant failures and the host can `resume()`.
+- **Reply auth is the capability the spec called for**: an HMAC over
+  (campaign, player, tick), verified before a binding is honored. It rides the
+  subject line because Email Routing matches exact addresses and the apex
+  catch-all belongs to another Worker.
+- **Build provenance**: `/api/health` reports the deployed revision, and
+  `gates.txt` prints MATCH or SKEW against the revision under review.
+- **Long-absence recaps** reach past the DO's rolling event buffer into D1.
+- **Cadence and quorum are changeable mid-campaign** (host-only `/pace`).
+- **An endurance harness** (`npm run sim:endurance`) drives 4 players through
+  60 ticks with absences of 1/3/30 turns.
+
+### Older detail (cycle 3's fixes)
 
 - **The first blocker was a process error, not a product defect.** An
   unfinished test was uncommitted while the critic captured evidence. See the
@@ -110,10 +158,13 @@ Cycle 3 scored 7/7/6/7/6 with 10 required fixes. All ten are done.
 
 ## Boundaries that are not the app's to fix
 
-1. **HSTS.** The app sends `max-age=31536000`; the zone serves
-   `max-age=0; includeSubDomains; preload`. Enabling it commits every
-   subdomain of `cortech.online` to HTTPS-only for the max-age window and
-   cannot be quickly undone. Owner's call — see `docs/DEPLOYMENT.md`.
+1. ~~**HSTS**~~ — **RESOLVED 2026-08-02.** The owner enabled it; production
+   serves `max-age=2592000; includeSubDomains; preload`. The smoke gate now
+   asserts the property (enabled, ≥30 days, covers subdomains) rather than
+   tolerating drift, and a zero max-age is a hard failure.
+1b. **Cloudflare's daily sending quota is account-wide.** A campaign's mail
+   cost is `players × ticks`, and concurrent campaigns compete for one
+   ceiling. Raising it is the owner's call. See `docs/DEPLOYMENT.md`.
 2. **Cloudflare Analytics auto-injection**, which forced two Cloudflare hosts
    into an otherwise strict CSP. Owner's call.
 3. **Third-party mailbox deliverability.** Gmail/Outlook spam placement cannot
