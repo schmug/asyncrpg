@@ -16,7 +16,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, rmSync } from "node:fs";
 
 const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
 const OUT = "critic-reports/ui";
@@ -134,6 +134,11 @@ const A11Y_AUDIT = `(() => {
 })()`;
 
 mkdirSync(OUT, { recursive: true });
+// A failure screenshot from a *previous* run is worse than none: it ships in
+// every evidence bundle afterwards showing a broken-looking page next to a
+// 34/34 pass, and a reviewer has no way to tell it is stale. Remove it up
+// front so its presence always means "this run failed".
+rmSync(`${OUT}/99-failure.png`, { force: true });
 console.log(`asyncrpg UI smoke — ${BASE} (mobile viewport)\n`);
 
 const browser = await chromium.launch();

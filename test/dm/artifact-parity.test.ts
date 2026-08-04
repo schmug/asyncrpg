@@ -30,6 +30,17 @@ describe("artifact pattern parity", () => {
     },
   );
 
+  it("carries the closed allowlist too, not just the blocklist", () => {
+    // The blocklist missed a new artifact class on five consecutive cycles.
+    // The allowlist is the rule that actually holds, so the live check must
+    // have it as well — mirroring only the patterns would leave the smoke
+    // suite one cycle behind again.
+    expect(smoke).toContain("ALLOWED_PROSE");
+    expect(smoke).toContain("Script=Latin");
+    expect(smoke).toMatch(/only characters prose is made of/);
+    expect(smoke).toMatch(/run of invisible filler/);
+  });
+
   it("checks the chronicle against every pattern it carries", () => {
     // The mirrored list is iterated, not hand-unrolled, so one loop covers all
     // of them — assert the loop is what runs.

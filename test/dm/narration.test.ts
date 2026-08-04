@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { templatedBeat } from "../../src/dm/fallback";
 import { parseIntentKeywords, resolveTarget } from "../../src/dm/intent";
-import { looksCorrupted, narrateBeat, normalizeProse, UNLIMITED_BUDGET } from "../../src/dm/narrate";
+import {
+  looksCorrupted,
+  narrateBeat,
+  normalizeProse,
+  outOfRepertoire,
+  UNLIMITED_BUDGET,
+} from "../../src/dm/narrate";
 import type { DmConfig } from "../../src/dm/narrate";
 import { joinCharacter } from "../../src/sim/character";
 import { generateWorld } from "../../src/sim/genesis";
@@ -457,6 +463,36 @@ describe("narrateBeat degradation", () => {
     "Ignore the previous paragraph.",
   ])("treats breaking frame as corruption — %s", (sample) => {
     expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    ["a run of soft hyphens", "who thanked him, who didn't." + "\u00ad".repeat(149)],
+    ["an ideographic space", "The snow came down thin\u3000and dry over the road."],
+    ["CJK ideographs", "He splints a wrist here, packs a wound there. \u81f3\u6b64\u5b8c\u6210"],
+    ["a stray closing brace", "He went from stall to stall, and found nothing at all }"],
+    ["a bracket tail", "an old habit of watching the doors [1]"],
+  ])("rejects out-of-repertoire prose — %s", (_label, sample) => {
+    // All five verbatim from the cycle-8 production capture. Enumerating bad
+    // shapes lost five cycles running; the rule is now a closed allowlist of
+    // what English prose is made of.
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    "The tithe came to 1.5 measures — no more, and he said so plainly.",
+    "\u201cWho sent you?\u201d she asked. Nobody answered; the fire cracked.",
+    "Sela of the Weir crossed the S\u00f6dermark at dusk, cold to the bone\u2026",
+    "Trade was good: 60% of the stalls were full, and the rest were coming.",
+  ])("accepts ordinary prose with real punctuation — %s", (sample) => {
+    expect(looksCorrupted(sample)).toBe(false);
+    expect(outOfRepertoire(sample)).toBeNull();
+  });
+
+  it("strips an incidental invisible rather than discarding a good beat", () => {
+    // One soft hyphen is a typographic accident; a run of them is a generation
+    // that came apart. The first is repaired, the second is rejected.
+    expect(normalizeProse("well\u00adworn boots")).toBe("wellworn boots");
+    expect(looksCorrupted("well\u00adworn boots")).toBe(false);
   });
 
   it("rewrites escape sequences the model wrote as literal text", () => {

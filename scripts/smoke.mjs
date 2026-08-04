@@ -263,6 +263,30 @@ async function main() {
     );
   }
 
+  // The closed rule, mirroring ALLOWED_PROSE in src/dm/narrate.ts. Enumerating
+  // bad shapes missed a new class on five consecutive cycles; stating what
+  // prose may contain cannot be outflanked the same way.
+  const ALLOWED_PROSE = /^[\p{Script=Latin}\p{Mark}0-9 \n.,;:!?'"\u201c\u201d\u2018\u2019()\-\u2013\u2014\u2026&/%\u00b0$\u00a3\u20ac+*]*$/u;
+  const stripped = prose.replace(/[\u00ad\u200b-\u200d\ufeff]/g, "");
+  let offender = null;
+  if (!ALLOWED_PROSE.test(stripped)) {
+    for (const ch of stripped) {
+      if (!ALLOWED_PROSE.test(ch)) {
+        offender = `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+        break;
+      }
+    }
+  }
+  check(
+    "the public chronicle contains only characters prose is made of",
+    offender === null,
+    offender ? `found ${offender}` : "",
+  );
+  check(
+    "the public chronicle has no run of invisible filler",
+    !/[\u00ad\u200b-\u200d\ufeff]{3,}/.test(prose),
+  );
+
   const meAnon = await req("/api/me");
   check(
     "/api/me answers anonymously without erroring",

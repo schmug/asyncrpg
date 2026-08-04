@@ -205,6 +205,10 @@ export function normalizeProse(text: string): string {
       // `//` has no business in narrative prose at all; the only legitimate
       // occurrence is inside a URL, where it follows a colon.
       .replace(/(?<!:)\/\/.*/g, "")
+      // Incidental invisible formatting: strip it so an otherwise-clean beat
+      // is not thrown away over a character nobody can see. A *run* of them is
+      // caught by `looksCorrupted` and rejects the beat instead.
+      .replace(/[\u00ad\u200b-\u200d\ufeff]/g, "")
       .replace(/[ \t]{2,}/g, " ")
       .replace(/[ \t]+\n/g, "\n")
       .replace(/\n{3,}/g, "\n\n")
@@ -256,9 +260,52 @@ export const ARTIFACT_PATTERNS: RegExp[] = [
   /\[(?:note|todo|placeholder|redacted)\b/i,
 ];
 
+/**
+ * The characters English narrative prose is actually made of.
+ *
+ * Five cycles running, a *new* shape of corruption reached the public
+ * chronicle and a newly-added pattern caught it a cycle too late: digits
+ * spliced onto a sentence, a code fence, a literal `//n`, an editorial aside,
+ * and then all at once a 149-character run of soft hyphens, four ideographic
+ * spaces, the CJK sequence 至此完成, and unmatched braces.
+ *
+ * Enumerating bad shapes is a losing game — there is always another one. So
+ * this inverts it: state what prose *is* allowed to contain and reject
+ * everything else. Latin letters and their diacritics (names may carry them),
+ * digits, spaces, newlines, and a fixed set of punctuation. A closed rule
+ * cannot be outflanked by a shape nobody predicted.
+ *
+ * Brackets and braces are deliberately absent: they have never appeared in a
+ * legitimate beat and they are how structured-output leakage shows up.
+ */
+const ALLOWED_PROSE =
+  /^[\p{Script=Latin}\p{Mark}0-9 \n.,;:!?'"“”‘’()\-–—…&/%°$£€+*]*$/u;
+
+/**
+ * Invisible formatting that is safe to remove when incidental. A *run* of it is
+ * not incidental — it is a generation that came apart — so `looksCorrupted`
+ * still rejects runs.
+ */
+const INVISIBLE = /[­​-‍﻿]/g;
+
+/** The first character that has no business in prose, for diagnosis. */
+export function outOfRepertoire(text: string): string | null {
+  if (ALLOWED_PROSE.test(text)) return null;
+  for (const ch of text) {
+    if (!ALLOWED_PROSE.test(ch)) {
+      return `U+${ch.codePointAt(0)!.toString(16).toUpperCase().padStart(4, "0")}`;
+    }
+  }
+  return null;
+}
+
 /** Exported so the smoke suite can hold the *live* chronicle to the same bar. */
 export function looksCorrupted(text: string): boolean {
-  return ARTIFACT_PATTERNS.some((re) => re.test(text));
+  if (ARTIFACT_PATTERNS.some((re) => re.test(text))) return true;
+  // A run of invisibles is degenerate output even though each character is
+  // individually harmless — 149 soft hyphens in a row shipped to production.
+  if (/[­​-‍﻿]{3,}/.test(text)) return true;
+  return outOfRepertoire(text.replace(INVISIBLE, "")) !== null;
 }
 
 /**
