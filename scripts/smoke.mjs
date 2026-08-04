@@ -229,7 +229,16 @@ async function main() {
   // for a reason that has nothing to do with prose.
   const prose = [...demo.text.matchAll(/<article class="beat">([\s\S]*?)<\/article>/g)]
     .map((m) => m[1].replace(/<[^>]*>/g, " "))
-    .join("\n");
+    .join("\n")
+    // Decode entities before judging characters. The chronicle escapes prose
+    // on the way out, so an unescaped extractor sees `&#39;` for every
+    // apostrophe — and reports the `#` as out-of-repertoire on every run.
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
   // Without this, an extraction that matched nothing would make all three
   // checks below pass on an empty string and read as clean.
   check(
