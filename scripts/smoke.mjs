@@ -161,10 +161,25 @@ async function main() {
   );
   check("HSTS covers subdomains", /includeSubDomains/i.test(hsts), hsts);
 
-  const csp = health.headers.get("content-security-policy") ?? "";
-  check("CSP is set and blocks framing", csp.includes("frame-ancestors 'none'"));
-  check("CSP does not allow inline script", !/script-src[^;]*unsafe-inline/.test(csp));
-  check("nosniff is set", health.headers.get("x-content-type-options") === "nosniff");
+  // Checked on *every* surface, not just the API. The app shell is served by
+  // Cloudflare's asset layer before the Worker runs, so `harden()` never
+  // touched it — `/` went out with no CSP at all while `/api/health` had one,
+  // and asserting only the API hid that for four cycles.
+  for (const [label, res] of [
+    ["the API", health],
+    ["the app shell", shell],
+    ["the public chronicle", await req("/c/demo")],
+  ]) {
+    const csp = res.headers.get("content-security-policy") ?? "";
+    check(`CSP is set and blocks framing on ${label}`, csp.includes("frame-ancestors 'none'"), csp ? "" : "no CSP at all");
+    check(`CSP does not allow inline script on ${label}`, csp !== "" && !/script-src[^;]*unsafe-inline/.test(csp));
+    check(`nosniff is set on ${label}`, res.headers.get("x-content-type-options") === "nosniff");
+    check(`framing is denied on ${label}`, (res.headers.get("x-frame-options") ?? "").toUpperCase() === "DENY");
+    check(
+      `referrer policy is set on ${label}`,
+      (res.headers.get("referrer-policy") ?? "").length > 0,
+    );
+  }
 
   // ─── email authentication ────────────────────────────────────────────
   //

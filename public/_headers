@@ -1,0 +1,19 @@
+# Security headers for statically-served assets.
+#
+# `harden()` in src/index.ts covers everything the Worker generates, and it was
+# reasonable to assume that included the app shell. It does not: with an assets
+# binding, Cloudflare serves matching static files directly from the asset layer
+# and the Worker script never runs. So `/` — the page that actually loads the
+# app, holds the session cookie, and renders player-authored text — was going
+# out with no CSP, no X-Frame-Options, and no Referrer-Policy, while
+# `/api/health` had all three. The smoke suite asserted the headers on the API
+# and never noticed.
+#
+# Keep this in sync with `harden()`. `scripts/smoke.mjs` now checks both
+# surfaces, so a divergence fails the gate rather than hiding for four cycles.
+/*
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+  X-Frame-Options: DENY
+  Content-Security-Policy: default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self' https://static.cloudflareinsights.com; connect-src 'self' https://cloudflareinsights.com; form-action 'self'; frame-ancestors 'none'; base-uri 'none'
+  Strict-Transport-Security: max-age=31536000; includeSubDomains
