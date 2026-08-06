@@ -71,6 +71,49 @@ async function bindingFor(
   return null;
 }
 
+/**
+ * Record what the handler decided about a message.
+ *
+ * A reply that does not become a turn and a reply that never arrived look
+ * identical from outside — both are silence. This is what tells them apart,
+ * and it is the difference between "Email Routing is misconfigured" and "we
+ * rejected it for a reason the sender was told but nobody kept".
+ *
+ * Best-effort and never awaited on the critical path: bookkeeping about mail
+ * must not be able to reject mail.
+ */
+async function recordInbound(
+  env: Env,
+  entry: {
+    to: string;
+    from: string;
+    subject: string;
+    disposition: "accepted" | "rejected" | "loopback";
+    reason: string;
+    campaignId?: string;
+  },
+): Promise<void> {
+  try {
+    await env.DB.prepare(
+      `INSERT INTO inbound_log (id, to_address, from_address, subject, disposition, reason, campaign_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+      .bind(
+        `in_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`,
+        entry.to.slice(0, 200),
+        entry.from.slice(0, 200),
+        entry.subject.slice(0, 200),
+        entry.disposition,
+        entry.reason.slice(0, 300),
+        entry.campaignId ?? "",
+        new Date().toISOString(),
+      )
+      .run();
+  } catch (err) {
+    console.error("inbound_log write failed", err);
+  }
+}
+
 export async function handleInboundEmail(
   message: ForwardableEmailMessage,
   env: Env,
@@ -94,9 +137,33 @@ export async function handleInboundEmail(
     messageIdHeader = parsed.messageId ?? messageIdHeader;
     headerFrom = parsed.from?.address ?? headerFrom;
   } catch {
+    ctx.waitUntil(
+      recordInbound(env, {
+        to: message.to,
+        from: message.from,
+        subject: "",
+        disposition: "rejected",
+        reason: "unreadable MIME",
+      }),
+    );
     message.setReject("Could not read that message.");
     return;
   }
+
+  /** Reject, and keep the reason where an operator can find it later. */
+  const reject = (told: string, reason: string, campaignId?: string): void => {
+    ctx.waitUntil(
+      recordInbound(env, {
+        to: message.to,
+        from: message.from || (headerFrom ?? ""),
+        subject: subject ?? "",
+        disposition: "rejected",
+        reason,
+        campaignId,
+      }),
+    );
+    message.setReject(told);
+  };
 
   // Mail to the verification loopback is not a player action — it is a beat
   // coming back to us, which the loopback records and answers.
@@ -113,6 +180,15 @@ export async function handleInboundEmail(
         campaignHeader: message.headers.get("x-asyncrpg-campaign"),
       }).catch((err) => console.error("loopback failed", err)),
     );
+    ctx.waitUntil(
+      recordInbound(env, {
+        to: message.to,
+        from: message.from,
+        subject: subject ?? "",
+        disposition: "loopback",
+        reason: "verification loopback",
+      }),
+    );
     return;
   }
 
@@ -121,7 +197,7 @@ export async function handleInboundEmail(
   const binding = await bindingFor(env, referencedMessageIds({ inReplyTo, references }), code);
 
   if (!isInboxAddress(localPart(message.to))) {
-    message.setReject("That address is not accepting mail.");
+    reject("That address is not accepting mail.", "not the inbox address");
     return;
   }
 
@@ -153,7 +229,7 @@ export async function handleInboundEmail(
     if (player) break;
   }
   if (!player) {
-    message.setReject("This address is not registered to play.");
+    reject("This address is not registered to play.", "sender not a registered player");
     return;
   }
 
@@ -171,10 +247,13 @@ export async function handleInboundEmail(
     if (rows.length === 1) {
       campaignId = rows[0]!.campaign_id;
     } else if (rows.length === 0) {
-      message.setReject("You are not in a campaign yet.");
+      reject("You are not in a campaign yet.", "player has no memberships");
       return;
     } else {
-      message.setReject("Reply to one of your campaign emails so we know which story you mean.");
+      reject(
+        "Reply to one of your campaign emails so we know which story you mean.",
+        "ambiguous: player is in several campaigns and gave no binding",
+      );
       return;
     }
   }
@@ -188,7 +267,7 @@ export async function handleInboundEmail(
     .first<{ id: string; email: string }>();
 
   if (!sender) {
-    message.setReject("This address is not a player in that campaign.");
+    reject("This address is not a player in that campaign.", "sender not a member of the bound campaign", campaignId);
     return;
   }
 
@@ -203,9 +282,11 @@ export async function handleInboundEmail(
       .first<{ tick: number }>();
     const now = current?.tick ?? binding.tick;
     if (binding.tick < now - 1) {
-      message.setReject(
+      reject(
         `That reply is from turn ${binding.tick} and the story is on turn ${now}. ` +
           `Reply to the most recent email so your action fits where everyone actually is.`,
+        `stale reply: binding tick ${binding.tick} vs current ${now}`,
+        campaignId,
       );
       return;
     }
@@ -214,16 +295,16 @@ export async function handleInboundEmail(
   // If a binding named a player, it must be the same person. A forwarded beat
   // must not let its recipient act as the player it was addressed to.
   if (binding && binding.player_id !== sender.id) {
-    message.setReject("This reply does not belong to you.");
+    reject("This reply does not belong to you.", "binding names a different player (forwarded beat)", campaignId);
     return;
   }
   if (binding && !sameAddress(message.from, sender.email) && !sameAddress(headerFrom, sender.email)) {
-    message.setReject("Sender mismatch.");
+    reject("Sender mismatch.", "sender does not match the bound player address", campaignId);
     return;
   }
 
   if (text.trim().length === 0) {
-    message.setReject("That reply had no action in it.");
+    reject("That reply had no action in it.", "no usable text after quote stripping", campaignId);
     return;
   }
 
@@ -231,9 +312,31 @@ export async function handleInboundEmail(
   // Submitting may resolve the tick, which narrates and fans out mail. Do not
   // hold the SMTP transaction open for that.
   ctx.waitUntil(
-    stub.submitAction(sender.id, text, "email").catch((err) => {
-      console.error("inbound submit failed", err);
-    }),
+    stub
+      .submitAction(sender.id, text, "email")
+      .then((result) =>
+        recordInbound(env, {
+          to: message.to,
+          from: message.from || (headerFrom ?? ""),
+          subject: subject ?? "",
+          disposition: result.accepted ? "accepted" : "rejected",
+          reason: result.accepted ? "submitted" : (result.reason ?? "campaign refused it"),
+          campaignId: campaignId!,
+        }),
+      )
+      .catch(async (err) => {
+        // The one failure the sender is never told about, because the SMTP
+        // transaction is long over by the time it happens.
+        console.error("inbound submit failed", err);
+        await recordInbound(env, {
+          to: message.to,
+          from: message.from || (headerFrom ?? ""),
+          subject: subject ?? "",
+          disposition: "rejected",
+          reason: `submission threw: ${err instanceof Error ? err.message : String(err)}`,
+          campaignId: campaignId!,
+        });
+      }),
   );
 }
 
