@@ -44,6 +44,8 @@ export interface BeatMail {
   prose: string;
   prompt: string;
   recap?: string[];
+  /** Offscreen players get a gentler sign-off — they are not being asked. */
+  offscreen?: boolean;
   /** Set when the DM acted for this player last tick, so we can say so plainly. */
   actedForYou?: string | null;
 }
@@ -83,7 +85,9 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   const text =
     `${mail.prose}${recapText}${autoText}\n\n` +
     `— ${mail.prompt}\n\n` +
-    `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n` +
+    (mail.offscreen
+      ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.\n`
+      : `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n`) +
     `Chronicle: ${chronicle}\n`;
 
   const html =
@@ -101,7 +105,9 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
     `<hr style="border:0;border-top:1px solid #ddd8cf;margin:1.6em 0">` +
     `<p style="margin:0 0 .6em;font-weight:600">${escapeHtml(mail.prompt)}</p>` +
     `<p style="margin:0 0 1em;color:#6b6459;font-size:.9em">` +
-    `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>` +
+    (mail.offscreen
+      ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.</p>`
+      : `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>`) +
     `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
     `</div>`;
 

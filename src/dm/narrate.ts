@@ -341,7 +341,14 @@ export async function narrateBeat(
     return { ...fallback, source: "templated", degradedReason: "no ANTHROPIC_API_KEY configured" };
   }
   if (!(await budget.canSpend(state.campaignId))) {
-    return { ...fallback, source: "templated", degradedReason: "campaign token budget exhausted" };
+    // Covers both "the cap is spent" and "the cap could not be read". They are
+    // different causes with the same correct response, and the operator-facing
+    // distinction is in the logs rather than in the player-facing beat.
+    return {
+      ...fallback,
+      source: "templated",
+      degradedReason: "campaign token budget exhausted or unavailable",
+    };
   }
 
   try {

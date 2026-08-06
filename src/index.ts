@@ -291,17 +291,50 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       .bind(id, slug, name, cadence, session.playerId, new Date().toISOString())
       .run();
 
+    // Creation spans four writes across two stores, and the order decides what
+    // a partial failure leaves behind. Membership is written *before* the clock
+    // starts: a campaign whose alarm is live but whose creator is not a member
+    // is one nobody can reach, act in, or repair — it just ticks. The reverse
+    // failure is harmless by comparison, so the risk is put there deliberately.
+    //
+    // Every step is idempotent on retry: the campaign row is keyed by id, DO
+    // init is a no-op once a world exists, `join` returns the existing
+    // character, and the membership insert ignores a conflict. So the client
+    // retrying a create that half-failed converges rather than duplicating.
     const campaign = stub(env, id);
-    await campaign.init({ campaignId: id, slug, name, cadence: cadence as "weekly" });
-    const joined = await campaign.join(session.playerId, session.displayName);
-    await env.DB.prepare(
-      `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
-       VALUES (?, ?, ?, ?, 'host', ?)`,
-    )
-      .bind(id, session.playerId, joined.characterId, joined.characterName, new Date().toISOString())
-      .run();
+    try {
+      await campaign.init({ campaignId: id, slug, name, cadence: cadence as "weekly" });
+      const joined = await campaign.join(session.playerId, session.displayName);
+      await env.DB.prepare(
+        `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
+         VALUES (?, ?, ?, ?, 'host', ?)
+         ON CONFLICT(campaign_id, player_id) DO NOTHING`,
+      )
+        .bind(
+          id,
+          session.playerId,
+          joined.characterId,
+          joined.characterName,
+          new Date().toISOString(),
+        )
+        .run();
 
-    return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
+      // Only now does the campaign start advancing on its own.
+      await campaign.startClock();
+
+      return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
+    } catch (err) {
+      // Roll the D1 row back so the slug is free and the half-built campaign
+      // does not sit in the creator's list as something they cannot open.
+      // The DO may survive with a world and no clock; it is unreachable
+      // without the row, harmless, and reclaimed by reusing the slug.
+      console.error(`campaign creation failed for ${slug}; rolling back:`, err);
+      await env.DB.prepare("DELETE FROM campaigns WHERE id = ?")
+        .bind(id)
+        .run()
+        .catch(() => {});
+      return fail(500, "could not create that campaign — nothing was saved, try again");
+    }
   }
 
   const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})(\/[a-z]+)?$/.exec(path);

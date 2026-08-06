@@ -211,11 +211,18 @@ export class CampaignDO extends DurableObject<Env> {
           // bigger share of the bill and was entirely unmetered.
           const spent = (row?.input_tokens ?? 0) + (row?.output_tokens ?? 0);
           return spent < cap;
-        } catch {
-          // A budget-table failure must not stop the game — but it must not be
-          // invisible either, or the cap silently stops existing.
-          console.error(`budget check failed for ${campaignId}; allowing and degrading open`);
-          return true;
+        } catch (err) {
+          // Fail *closed*. This used to allow spend when the accounting was
+          // unavailable, which is the one moment a cap most needs to hold: an
+          // outage in the budget store is exactly when unbounded model spend
+          // would go unnoticed and unrecorded. "Do not stop the game" is
+          // satisfied without it — the tick still resolves, narration just
+          // degrades to templated prose and says why.
+          console.error(
+            `budget check failed for ${campaignId}; degrading to templated narration:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          return false;
         }
       },
       record: async (campaignId, inputTokens, outputTokens) => {
@@ -294,7 +301,9 @@ export class CampaignDO extends DurableObject<Env> {
     this.#put("history", events.slice(-200));
 
     await this.#projectGenesis(req, state, events);
-    await this.#scheduleNextTick();
+    // The clock is NOT started here. A campaign that begins ticking before its
+    // creator is a member is one nobody can reach or repair — it just advances
+    // on its own. `startClock()` is called once creation has fully landed.
     return { tick: state.tick, place: state.scene.situation };
   }
 
@@ -308,7 +317,8 @@ export class CampaignDO extends DurableObject<Env> {
     });
     assertWorldInvariants(world);
     this.#put("world", world);
-    // A first player makes the campaign live; make sure the clock is running.
+    // A player joining an already-created campaign makes it live; for the host
+    // during creation this is a no-op, because `startClock()` follows anyway.
     await this.#scheduleNextTick();
     return {
       characterId: character.id,
@@ -735,9 +745,21 @@ export class CampaignDO extends DurableObject<Env> {
         toEmail: member.email,
         headline,
         prose: beat.prose,
-        prompt: promptFor(character, state),
+        // An offscreen player is not being asked anything. Sending them "What
+        // do you do?" every turn is the social half of the penalty the design
+        // forbids: their character has quietly stepped out of the story, and
+        // the mail still arrives weekly asking them to take a turn they are
+        // not holding up. Nothing else changes — they keep receiving the beat,
+        // because the story is still theirs to read and coming back must stay
+        // one reply away.
+        prompt:
+          character.presence === "offscreen"
+            ? `${character.name} is offscreen for now. Nothing needs doing — ` +
+              `reply whenever you feel like rejoining, and you will get a recap.`
+            : promptFor(character, state),
         recap: result.recaps[character.id],
         actedForYou: auto ? auto.action.intent : null,
+        offscreen: character.presence === "offscreen",
       });
 
       // A beat that did not reach its player is a lost turn on the primary
@@ -968,6 +990,14 @@ export class CampaignDO extends DurableObject<Env> {
     this.#put("config", { ...config, cadence, quorumFraction });
     await this.#scheduleNextTick();
     return { cadence, quorumFraction };
+  }
+
+  /**
+   * Begin advancing. Separate from `init` so creation can put the campaign in
+   * the creator's hands before it starts moving without them. Idempotent.
+   */
+  async startClock(): Promise<void> {
+    await this.#scheduleNextTick();
   }
 
   async resume(): Promise<{ resumed: boolean; wasHalted: boolean }> {
