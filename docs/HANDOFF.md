@@ -24,7 +24,17 @@ cycles**, cap 12 cycles. Check-ins: first deploy (done) and completion.
 | 5 | 8 | 8 | 7 | 7 | 7 | fail |
 | 6 | 7 | 7 | 7 | 7 | 7 | fail |
 | 7 | 7 | 7 | 8 | 7 | 8 | fail |
-| 8 | — | — | — | — | — | blocked on send quota |
+| 8 | 7 | 8 | 6 | 7 | 7 | fail |
+| 9 | 7 | 7 | 7 | 7 | 7 | fail |
+| 10 | 6 | 7 | 8 | 6 | 7 | fail |
+| 11 | 8 | 9 | 8 | 7 | 7 | fail |
+| 12 | 7 | 9 | 7 | 7 | 8 | fail |
+
+**The loop reached its 12-cycle cap without meeting the gate** (every category
+>= 8 on two consecutive cycles). Best single cycle was 11 at 8/9/8/7/7. No
+category ever held >= 8 twice running.
+
+Remaining work is filed as issues #2-#5. Nothing is in flight.
 
 Reports are committed in `critic-reports/`. Every cycle-3 finding is landed,
 deployed, and verified live.
