@@ -71,6 +71,8 @@ function cleanup() {
         `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM reply_bindings WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE '${SMOKE_PREFIX}%';`,
     );

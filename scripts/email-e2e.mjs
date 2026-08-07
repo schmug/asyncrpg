@@ -95,6 +95,9 @@ function cleanup() {
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM email_loopback WHERE to_address LIKE '%rpgloop%' OR from_address LIKE '%rpgloop%';` +
         `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%');` +
+        `DELETE FROM inbound_log WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%';`,
     );
