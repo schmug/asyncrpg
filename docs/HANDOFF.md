@@ -1,7 +1,7 @@
 # Handoff — asyncrpg critic-gated build
 
-**Written 2026-08-02.** The previous agent ran out of context mid-loop. Everything
-below is committed and deployed; nothing is in flight.
+**Written 2026-08-02, closed 2026-08-07.** The loop ran to its 12-cycle cap.
+Everything below is committed and deployed; nothing is in flight.
 
 ## Where things stand
 
@@ -42,7 +42,7 @@ deployed, and verified live.
 ```bash
 npm run deploy                                                    # injects the revision
 node scripts/seed-demo.mjs https://play.cortech.online --ticks 6   # fresh prose to judge
-node scripts/critic.mjs 08
+node scripts/critic.mjs 13   # only if the cap is lifted
 ```
 
 **Seeding costs email.** Every tick mails every member, and Cloudflare's
@@ -67,12 +67,12 @@ background and read `critic-reports/cycle-03.json`.
 
 | Command | Result |
 |---|---|
-| `npm test` | 254 passing |
+| `npm test` | 287 passing |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | invariants hold, replay identical, economy and state size bounded |
 | `npm run sim:endurance` | 4 players, 60 ticks, quorum + deadline, absences of 1/3/30, the promise asserted every turn |
-| `node scripts/smoke.mjs <url>` | 84/84, mostly adversarial |
-| `node scripts/ui-smoke.mjs <url>` | 34/34, mobile viewport, SWs blocked |
+| `node scripts/smoke.mjs <url>` | 98/98, mostly adversarial; headers asserted on shell, API and chronicle |
+| `node scripts/ui-smoke.mjs <url>` | 35/35, mobile viewport, SWs blocked |
 | `node scripts/email-e2e.mjs <url>` | 22/22, including the real two-zone round trip |
 
 Revision skew is now checkable rather than assumed: `/api/health` reports the
