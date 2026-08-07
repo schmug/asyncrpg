@@ -466,11 +466,11 @@ export async function renderChronicle(
       `</div>`
     : "";
 
-  // Side material earns a place in the artifact — writing a private scene that
+  // Side material earns a place in the artifact — writing a solo scene that
   // nobody can ever read back would make the feature pointless.
   const journalRows = journals.results ?? [];
   const journalHtml = journalRows.length
-    ? `<h2>Private scenes</h2>` +
+    ? `<h2>Solo scenes</h2>` +
       journalRows
         .map(
           (j) =>

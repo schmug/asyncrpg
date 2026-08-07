@@ -269,19 +269,23 @@
         </details>
 
         <details id="journal-details">
-          <summary>Write a private scene</summary>
+          <summary>Write a solo scene</summary>
           <form id="journal-form" novalidate>
             <label for="journal-title">Title (optional)</label>
             <input id="journal-title" name="title" type="text" maxlength="120" placeholder="The night before" />
+            <p class="fine">
+              Solo means only your character is in it — <strong>not</strong> that it stays private.
+              It is published on the public chronicle, where anyone with the link can read it.
+            </p>
             <label for="journal-body">What happens</label>
             <textarea
               id="journal-body"
               name="body"
               rows="5"
               maxlength="8000"
-              placeholder="A moment only your character was there for. It joins the chronicle."
+              placeholder="A moment only your character was there for."
             ></textarea>
-            <button type="submit" class="primary">Add to the chronicle</button>
+            <button type="submit" class="primary">Publish to the chronicle</button>
           </form>
         </details>
 
