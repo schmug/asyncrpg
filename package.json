@@ -28,6 +28,7 @@
     "wrangler": "^4.118.0"
   },
   "dependencies": {
+    "@anthropic-ai/sdk": "^0.115.0",
     "postal-mime": "^2.7.5"
   }
 }

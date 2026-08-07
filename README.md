@@ -6,8 +6,13 @@ and a language model as dungeon master.
 Your group picks a cadence — daily, weekly, or monthly — and the story advances
 on that clock, forever if you want. Miss a week because life happened and
 nothing bad occurs: your character keeps acting in character, then quietly
-steps offscreen, then rejoins with a recap whenever you come back. There is no
-XP ladder to fall behind on and no penalty of any kind for absence.
+steps offscreen, then rejoins with a recap whenever you come back.
+
+Precisely: absence never costs you attributes, skills, renown, items,
+conditions, your life, or access to anything, and there is no XP ladder to fall
+behind on. It does mean fewer entries in the chronicle than someone who played
+every week — story presence is the one thing engagement buys, and it buys
+nothing mechanical. See the spec for why that line is drawn where it is.
 
 Play from your inbox. A richer web interface is there if you want it.
 
@@ -93,8 +98,52 @@ npm run sim:soak   # 500 deterministic ticks + invariant + replay checks
 npm run dev        # local worker
 ```
 
+## Playing
+
+A host creates a campaign and gets an invite link. Everyone else opens it,
+signs in with their email, and names a character. From then on the story
+arrives by email and you reply to it; the web app is there if you want it.
+
+A turn resolves when **a quorum of players has acted or the deadline passes**,
+whichever comes first — so an eager group moves fast and a slow group still
+moves. Quorum counts only players who are currently present, or a half-dormant
+group could never reach it.
+
+Between turns there is optional depth: downtime, in-character letters, and
+private scenes that join the chronicle. None of it changes your attributes or
+skills, and the tests enforce that — a bonus for showing up is a penalty for
+not showing up, just written the other way round.
+
 ## Status
 
-In active development against `docs/specs/2026-08-02-asyncrpg-design.md`, gated
-by an independent third-party critic that scores five rubric categories on
-every deploy. Not yet playable end to end.
+Deployed at [play.cortech.online](https://play.cortech.online) and playable end
+to end. A public demo chronicle lives at
+[/c/demo](https://play.cortech.online/c/demo).
+
+Development is gated by an independent third-party critic (`codex`, fresh
+context, read-only sandbox) that scores five rubric categories against a clean
+clone plus a live-capture bundle on every cycle. The bar is every category ≥ 8
+on two consecutive cycles.
+
+| Gate | What it proves |
+|---|---|
+| `npm test` | 167 tests, including the absence promise and the world invariants |
+| `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
+| `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
+| `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |
+
+The email test is a genuine loop, not a simulation of one: the game mails a
+beat to a reserved address on a **second** onboarded zone, Cloudflare delivers
+it back to the Worker, the Worker replies, Cloudflare delivers *that* to the
+Worker, and the reply becomes a turn. Two zones, two real deliveries.
+
+It caught a bug nothing else could have. The inbound handler authenticated on
+the SMTP envelope sender — but Cloudflare rewrites that to
+`bounces@cf-bounce.<domain>` on mail it sends, so every legitimate reply was
+being rejected as an unregistered address. Identification now falls back to the
+header From, which is safe here specifically because Email Routing enforces
+SPF/DKIM/DMARC before the handler ever runs.
+
+Still not covered: deliverability to third-party mailboxes and their spam
+handling. That needs seed-list testing, not a self-test.

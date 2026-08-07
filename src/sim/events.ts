@@ -46,4 +46,20 @@ export class EventLog {
   get events(): WorldEvent[] {
     return this.#events;
   }
+
+  /**
+   * Allocate an id for a newly created entity.
+   *
+   * Positional on (tick, sequence) rather than derived from collection size.
+   * Size-derived ids look fine until something is deleted: once pruning shrinks
+   * a collection, `prefix_${length}` starts handing out ids that are still in
+   * use, silently overwriting live entities. Tick is monotonic and the counter
+   * is per-tick, so these can never collide — and they stay deterministic
+   * across replays, which size-derived ids also were not.
+   */
+  nextId(prefix: string): string {
+    return `${prefix}_t${this.#tick}_${this.#idSeq++}`;
+  }
+
+  #idSeq = 0;
 }

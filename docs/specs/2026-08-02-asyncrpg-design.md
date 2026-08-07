@@ -35,9 +35,22 @@ The LLM has exactly two jobs, both schema-bounded:
 1. **Intent parsing** — free text → typed `PlayerAction`.
 2. **Narration** — resolved `WorldEvent[]` + state → prose.
 
-Any state delta the model proposes is validated against sim rules and
-**rejected if illegal**. The model cannot invent a faction, resurrect a dead
-NPC, or teleport a party.
+> **Implementation note (2026-08-02):** this section originally specified that
+> state deltas proposed by the model would be validated against sim rules and
+> rejected if illegal. The implementation is stronger: **there is no delta
+> channel at all.** The narrator returns prose and a bounded one-line scene
+> description, and nothing else it produces is ever written to world state.
+> There is no illegal write to catch because there is no write. What the model
+> says happened and what the sim recorded cannot diverge, because the sim is
+> what it was told.
+>
+> The intent parser is the only path by which model output influences state,
+> and it is doubly constrained: the verb must be in a fixed enum, and the
+> target must resolve to an entity that already exists (dead NPCs, razed
+> settlements, and unrevealed threats deliberately do not resolve). An
+> invented name yields an action with no target, never a new entity.
+
+The model cannot invent a faction, resurrect a dead NPC, or teleport a party.
 
 This is what makes months-long coherence possible: the baron the party snubbed
 in tick 3 is a row with an agenda and a grudge value, not a sentence in a
@@ -106,6 +119,33 @@ first. An eager group moves fast; a slow group still moves.
 
 **Never, for any length of absence:** stat loss, item loss, death, removal, or
 missed-content penalty.
+
+### What "no penalty" precisely means
+
+An independent review found the promise, as originally worded, overclaimed.
+Stating it exactly:
+
+**Guaranteed, and enforced by tests.** For any length of absence, a character
+never loses attributes, skills, renown, items, or conditions; never dies or is
+removed; and never has content locked away from them. An action the DM takes on
+their behalf is floored *and capped* at a partial success, cannot apply a
+condition, cannot reduce renown, and cannot advance the absence clock. There is
+no level, no XP, and no gear treadmill to fall behind on. A player who joins at
+tick 200 starts from the same spread as one who joined at tick 1.
+
+**Not guaranteed, and deliberately so.** A player who plays more accrues more
+*story presence* — more entries in the chronicle, warmer relationships with
+NPCs, a wider reputation. That is the point of the depth features, which were
+requested precisely so that people who want to do more can. Renown feeds
+difficulty, so a well-known character faces different situations, not easier
+ones; and it is shown as a phrase rather than a score so it does not read as a
+leaderboard.
+
+The distinction is between *penalty* and *difference*. Being away costs you
+nothing. Being present earns you a place in the story. A design where those two
+were identical would have nothing for the engaged player to do, which was an
+explicit requirement.
+
 
 There is also **no XP ladder to fall behind on.** Advancement is reputation and
 relationships recorded by the sim — you become *known for* things — not levels.
@@ -206,8 +246,13 @@ in D1. Exceeding either degrades narration quality — it never blocks play.
    core flow, touch-target and a11y audits, console-error gate, screenshots.
    **Service workers are blocked in the smoke context** — offline emulation does
    not reach SW-mediated fetches, so an outage drill would silently test nothing.
-4. **Email loopback E2E** — the Worker sends to its own subaddress and receives
-   it back through real Cloudflare delivery, proving the full inbound path.
+4. **Email round trip** — the game mails a beat to a reserved address on a
+   *second* onboarded zone; Cloudflare delivers it back to the Worker; the
+   Worker replies; Cloudflare delivers that to the Worker; the reply becomes a
+   turn. Two zones and two real deliveries, so no part of the mail path can be
+   broken without this failing. (Originally scoped as a same-domain
+   subaddress loop, which does not work: Cloudflare subaddressing is a
+   zone-wide setting, and a single zone would not exercise cross-zone routing.)
 5. **Sim soak** — 500 deterministic ticks, no LLM.
 
 A broken verification harness is a P0 defect, not an inconvenience.

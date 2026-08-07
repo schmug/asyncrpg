@@ -33,15 +33,30 @@
 
   "send_email": [{ "name": "EMAIL" }],
 
+  "routes": [{ "pattern": "play.cortech.online", "custom_domain": true }],
+
   "vars": {
-    "MAIL_DOMAIN": "play.cortech.online",
+    // The web app lives on the subdomain, but mail must come from the apex:
+    // Email Sending and Email Routing are onboarded on cortech.online, and
+    // Cloudflare has no API for adding a subdomain to either (the flow is
+    // Dashboard-only). Sending from an un-onboarded domain silently fails.
+    "MAIL_DOMAIN": "cortech.online",
     "PUBLIC_ORIGIN": "https://play.cortech.online",
     // Narration model tiers. Overridden per-environment if needed.
+    // Sonnet 5 writes the beat players read; Haiku 4.5 does the cheap
+    // high-volume work (intent parsing, recaps). Note Haiku 4.5 does not
+    // support `output_config.effort` — never send it on the cheap tier.
     "MODEL_NARRATE": "claude-sonnet-5",
-    "MODEL_CHEAP": "claude-haiku-4-5-20251001",
+    "MODEL_CHEAP": "claude-haiku-4-5",
     // Monthly per-campaign output-token budget. Exceeding it degrades
     // narration to templated sim prose; it never blocks a tick.
-    "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000"
+    "CAMPAIGN_MONTHLY_TOKEN_BUDGET": "400000",
+
+    // Reserved mailbox on a second onboarded zone. Beats sent here come back
+    // through real Email Routing and are answered, which is what proves the
+    // inbound SMTP hop end to end. Deliberately a different zone from
+    // MAIL_DOMAIN so the loop crosses two independent Cloudflare zones.
+    "EMAIL_LOOPBACK_ADDRESS": "rpgloop@q-r.contact"
   }
 
   // Secrets (set via `wrangler secret put`, never committed):

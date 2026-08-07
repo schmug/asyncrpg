@@ -3,9 +3,209 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="color-scheme" content="light dark" />
+    <meta name="theme-color" content="#f6f3ec" />
     <title>asyncrpg</title>
+    <meta
+      name="description"
+      content="An asynchronous, play-by-email tabletop RPG with a simulated world and an LLM dungeon master."
+    />
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="icon" href="/icon.svg" type="image/svg+xml" />
+    <link rel="stylesheet" href="/app.css" />
   </head>
   <body>
-    <p>Booting…</p>
+    <a class="skip" href="#main">Skip to content</a>
+
+    <header class="topbar">
+      <a class="brand" href="/">asyncrpg</a>
+      <button id="signout" class="linkbtn" type="button" hidden>Sign out</button>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <p id="status" class="status" role="status" aria-live="polite"></p>
+
+      <!-- Signed out -->
+      <section id="view-signin" hidden>
+        <h1>A tabletop campaign that waits for you</h1>
+        <p class="lede">
+          Your group plays by email, at whatever pace suits. Miss a week and nothing bad happens —
+          no penalty, ever. The world keeps turning; you pick up where you left off.
+        </p>
+        <form id="signin-form" novalidate>
+          <label for="email">Your email</label>
+          <input
+            id="email"
+            name="email"
+            type="email"
+            autocomplete="email"
+            inputmode="email"
+            required
+            placeholder="you@example.com"
+          />
+          <button type="submit" class="primary">Email me a sign-in link</button>
+        </form>
+        <p class="fine">No password. We send a link that works once.</p>
+      </section>
+
+      <!-- Signed in, campaign list -->
+      <section id="view-home" hidden>
+        <h1>Your campaigns</h1>
+        <ul id="campaign-list" class="list"></ul>
+        <details id="create-details">
+          <summary>Start a new campaign</summary>
+          <form id="create-form" novalidate>
+            <label for="c-name">Name</label>
+            <input id="c-name" name="name" type="text" required maxlength="80" placeholder="Ashfall" />
+            <label for="c-slug">Short link</label>
+            <input
+              id="c-slug"
+              name="slug"
+              type="text"
+              required
+              maxlength="31"
+              pattern="[a-z0-9][a-z0-9-]{1,30}"
+              placeholder="ashfall"
+            />
+            <label for="c-cadence">How often does the story advance?</label>
+            <select id="c-cadence" name="cadence">
+              <option value="weekly" selected>Weekly</option>
+              <option value="daily">Daily</option>
+              <option value="monthly">Monthly</option>
+            </select>
+            <button type="submit" class="primary">Create campaign</button>
+          </form>
+        </details>
+      </section>
+
+      <!-- Invited -->
+      <section id="view-invite" hidden>
+        <h1>You've been invited</h1>
+        <p class="lede" id="invite-campaign"></p>
+        <form id="join-form" novalidate>
+          <label for="join-name">Your character's name</label>
+          <input id="join-name" name="name" type="text" required maxlength="60" placeholder="Kestrel Vane" />
+          <label for="join-concept">In a few words, who are they?</label>
+          <input
+            id="join-concept"
+            name="concept"
+            type="text"
+            maxlength="140"
+            placeholder="a courier who reads the letters she carries"
+          />
+          <button type="submit" class="primary">Join the campaign</button>
+        </form>
+        <p class="fine">
+          The story moves on a clock your group picked. Reply when it suits you — missing a turn
+          costs you nothing.
+        </p>
+      </section>
+
+      <!-- A campaign -->
+      <section id="view-campaign" hidden>
+        <p class="crumb"><button id="back" class="linkbtn" type="button">&larr; All campaigns</button></p>
+        <h1 id="c-title"></h1>
+        <p id="c-where" class="lede"></p>
+
+        <div id="c-clock" class="clock"></div>
+        <p id="c-repair" class="status err" hidden></p>
+
+        <section id="beat-box" hidden>
+          <h2 id="beat-heading">The story so far</h2>
+          <article id="beat" class="beat"></article>
+        </section>
+
+        <form id="action-form" novalidate>
+          <label for="action" id="action-label">What do you do?</label>
+          <textarea
+            id="action"
+            name="text"
+            rows="4"
+            required
+            maxlength="4000"
+            placeholder="Write what your character does, in your own words."
+          ></textarea>
+          <button type="submit" class="primary">Submit turn</button>
+        </form>
+
+        <details id="sheet-details">
+          <summary>Your character</summary>
+          <div id="sheet"></div>
+        </details>
+
+        <h2>The party</h2>
+        <ul id="c-cast" class="list"></ul>
+        <div id="invite-box" hidden>
+          <button id="invite-btn" class="primary" type="button">Invite someone</button>
+          <p class="fine" id="invite-hint">
+            You're the host. Share the link with your group — they sign in with their email and
+            pick a character.
+          </p>
+          <label for="invite-url" id="invite-url-label" hidden>Invite link</label>
+          <input id="invite-url" type="text" readonly hidden />
+        </div>
+
+        <h2>Between turns</h2>
+        <p class="fine">
+          Optional. None of this makes your character stronger — skipping all of it costs you
+          nothing.
+        </p>
+
+        <details id="dt-details">
+          <summary>Spend some downtime</summary>
+          <form id="downtime-form" novalidate>
+            <label for="dt-kind">What do you do with the time?</label>
+            <select id="dt-kind" name="kind">
+              <option value="craft">Make something</option>
+              <option value="research">Read and ask around</option>
+              <option value="train">Practise where people can see</option>
+              <option value="network">Spend time with someone</option>
+              <option value="recover">Rest</option>
+            </select>
+            <label for="dt-detail">Details (optional)</label>
+            <input id="dt-detail" name="detail" type="text" maxlength="200" placeholder="a bone flute" />
+            <button type="submit" class="primary">Do it</button>
+          </form>
+        </details>
+
+        <details id="letter-details">
+          <summary>Write to someone in the party</summary>
+          <form id="letter-form" novalidate>
+            <label for="letter-to">To</label>
+            <select id="letter-to" name="to"></select>
+            <label for="letter-body">Your letter</label>
+            <textarea
+              id="letter-body"
+              name="body"
+              rows="4"
+              maxlength="4000"
+              placeholder="In character. The DM sees it too."
+            ></textarea>
+            <button type="submit" class="primary">Send it</button>
+          </form>
+        </details>
+
+        <details id="journal-details">
+          <summary>Write a private scene</summary>
+          <form id="journal-form" novalidate>
+            <label for="journal-title">Title (optional)</label>
+            <input id="journal-title" name="title" type="text" maxlength="120" placeholder="The night before" />
+            <label for="journal-body">What happens</label>
+            <textarea
+              id="journal-body"
+              name="body"
+              rows="5"
+              maxlength="8000"
+              placeholder="A moment only your character was there for. It joins the chronicle."
+            ></textarea>
+            <button type="submit" class="primary">Add to the chronicle</button>
+          </form>
+        </details>
+
+        <p><a id="c-chronicle" href="#" class="chronlink">Read the chronicle &rarr;</a></p>
+      </section>
+    </main>
+
+    <script src="/app.js" type="module"></script>
   </body>
 </html>
