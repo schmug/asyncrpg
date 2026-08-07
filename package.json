@@ -16,7 +16,7 @@
     "critic": "node scripts/critic.mjs"
   },
   "devDependencies": {
-    "@cloudflare/vitest-pool-workers": "^0.20.1",
+    "@cloudflare/vitest-pool-workers": "^0.20.3",
     "@cloudflare/workers-types": "^5.20260801.1",
     "@types/node": "^26.1.2",
     "@vitest/runner": "^4.1.10",
@@ -25,7 +25,7 @@
     "tsx": "^4.23.4",
     "typescript": "^7.0.2",
     "vitest": "^4.1.10",
-    "wrangler": "^4.118.0"
+    "wrangler": "^4.120.0"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.115.0",
