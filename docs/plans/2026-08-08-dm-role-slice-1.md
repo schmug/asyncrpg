@@ -817,7 +817,7 @@ npm test -- test/integration/dm-seat.test.ts
 
 Expected: PASS, 9 tests.
 
-- [ ] **Step 5: Widen the route regex**
+- [ ] **Step 5: Widen the route regex — under `/dm` only**
 
 The current pattern only allows a single lowercase action segment, so `/dm/window` would 404. In `src/index.ts` at line 266, replace:
 
@@ -828,9 +828,24 @@ The current pattern only allows a single lowercase action segment, so `/dm/windo
 with:
 
 ```ts
-  // Two segments, because the DM endpoints are nested (`/dm/beat`, `/dm/window`).
-  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})((?:\/[a-z]+){0,2})?$/.exec(path);
+  // A second segment is allowed under `/dm` and nowhere else, because the DM
+  // endpoints are the only nested ones (`/dm/beat`, `/dm/window`).
+  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})(\/dm\/[a-z]+|\/[a-z]+)?$/.exec(path);
 ```
+
+Do **not** reach for a blanket `((?:\/[a-z]+){0,2})?`. That was the first
+attempt and it enlarges the API surface for every action, not just `/dm`:
+`/invite/extra`, `/action/x`, `/resolve/now`, `/downtime/extra`, `/letter/x`,
+`/journal/x` and `/reproject/now` all begin matching, fall through every
+`action === "/…"` comparison inside the branch, and return **405 where they
+used to 404**. Not a hole — group 2 stays clean and `!member` still gates — but
+an unrequested behaviour change that tells a prober "this endpoint exists,
+wrong method". The alternation above is exactly as permissive as the original
+for every non-DM path; its only new matches are `/dm/<lowercase word>`, which
+covers all eight nested DM endpoints in the spec's §8 table and nothing else.
+
+Pin it: assert `/invite/extra`, `/action/x` and `/resolve/now` still 404
+alongside the test that asserts `/dm/window` and `/dm/beat` route.
 
 - [ ] **Step 6: Add the seat endpoint**
 
@@ -845,9 +860,20 @@ In `src/index.ts`, immediately after the `/invite` branch closes (line 288) and 
       const isDm = seat?.dmPlayerId === session.playerId;
       if (!isHost && !isDm) return fail(403, "only the host or the current DM can move the seat");
 
-      const body = await readJson<{ playerId?: string | null }>(request);
-      const target = body?.playerId ?? null;
+      // Vacating has to be something the caller *said*, never something the
+      // request failed to say. Only an explicit `{ playerId: null }` vacates.
+      const body = await readJson<Record<string, unknown>>(request);
+      if (body === null || typeof body !== "object" || Array.isArray(body) || !("playerId" in body)) {
+        return fail(400, "send { playerId }, or { playerId: null } to vacate the seat");
+      }
+      const target = body.playerId;
       if (target !== null) {
+        // Still an unchecked cast over network input: the key is present, but
+        // its value is whatever the caller sent, and handing D1 a non-string to
+        // bind throws inside the driver — a malformed request as a 500.
+        if (typeof target !== "string") {
+          return fail(400, "playerId must be a player id, or null to vacate the seat");
+        }
         if (!(await isMember(env, campaign.id, target))) {
           return fail(400, "that person is not in this campaign");
         }
@@ -856,6 +882,21 @@ In `src/index.ts`, immediately after the `/invite` branch closes (line 288) and 
       return json({ ok: true, dmPlayerId: target });
     }
 ```
+
+Do **not** write `const target = body?.playerId ?? null;`. That was the first
+attempt and it is wrong in a way that reads as harmless. `readJson` returns
+`null` for an unparseable body **and, identically, for one over its 32 KB
+cap**, so `?.`/`??` collapses eleven distinct shapes into "vacate the seat" and
+answers `200 {"ok":true}`: `{}`, no body at all, an empty body, non-JSON
+garbage, a JSON `null`/`true`/array/string/number, a misspelled key, and — the
+one that stings — a well-formed `{"playerId":"plr_…"}` that merely grew past
+the cap. A dropped body, a proxy that stripped it, or a truncated client retry
+would silently empty the DM seat and report success. The spec
+(`docs/specs/2026-08-08-dm-role-design.md` §8) says `{ playerId }` assigns and
+`{ playerId: null }` vacates; absent, malformed, or oversized is a 400. Keep
+both guards — the envelope check above and the `typeof target !== "string"`
+check inside — they catch different things, and dropping the inner one yields
+a 500 from the D1 driver.
 
 Add the import at the top of `src/index.ts`, after the `./email/inbound` import:
 
@@ -942,6 +983,42 @@ Append to `test/integration/dm-seat.test.ts`, inside the top-level `describe`:
       expect(res.status).toBe(200);
       expect((await getSeat(env.DB, CAMPAIGN))?.dmPlayerId).toBeNull();
     });
+
+    // Testing only the shape that *should* vacate is what let the
+    // `body?.playerId ?? null` bug through review. Every shape that must not
+    // vacate needs a row, and each row asserts the seat is still where it was
+    // — a 400 that destroyed the seat anyway would pass a status-only check.
+    // Several of these cannot be expressed through `JSON.stringify`, so the
+    // request helper needs a way to send raw bytes.
+    const MALFORMED: Array<[string, { body?: unknown; raw?: string }]> = [
+      ["an empty object", { body: {} }],
+      ["no body at all", {}],
+      ["an empty body", { raw: "" }],
+      ["a body that is not JSON", { raw: "not json at all" }],
+      ["a JSON null", { raw: "null" }],
+      ["a JSON true", { raw: "true" }],
+      ["a JSON array", { raw: '["plr_two"]' }],
+      ["a JSON string", { raw: '"plr_two"' }],
+      ["a JSON number", { raw: "42" }],
+      ["a misspelled key", { body: { player_id: "plr_two" } }],
+      [
+        "an oversized but otherwise well-formed body",
+        { raw: `{"playerId":"plr_two","pad":"${"x".repeat(40_000)}"}` },
+      ],
+    ];
+
+    for (const [label, init] of MALFORMED) {
+      it(`rejects ${label} rather than vacating the seat`, async () => {
+        await setSeat(env.DB, CAMPAIGN, "plr_two");
+        const res = await call("/api/campaigns/seat/dm", {
+          method: "POST",
+          playerId: "plr_host",
+          ...init,
+        });
+        expect(res.status, label).toBe(400);
+        expect((await getSeat(env.DB, CAMPAIGN))?.dmPlayerId, label).toBe("plr_two");
+      });
+    }
   });
 ```
 
