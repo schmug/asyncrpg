@@ -336,15 +336,38 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       return json({ ok: true, dmPlayerId: target });
     }
 
-    // Everything below the seat itself requires holding it. The check sits
-    // ahead of the membership check on purpose: holding the seat implies
-    // membership (`/dm` will not assign it to anyone else), so a non-member and
-    // a member without the seat get the same 403 and neither learns anything
-    // about the other from the answer.
+    // Everything below the seat itself requires holding it *and* being in the
+    // campaign. The general membership check further down is deliberately not
+    // what these endpoints lean on: they answer before it, so that a non-member
+    // and a member without the seat get the identical 403 and neither refusal
+    // becomes an oracle for who is in the campaign.
+    //
+    // Holding the seat already implies membership — `/dm` is the only writer of
+    // the column and it refuses a non-member — so the second condition is
+    // unreachable today. It is here because that invariant is enforced in a
+    // different branch of a different check, and `/dm/review` reads the beat
+    // deliberately unfiltered on the strength of it. A membership-removal path
+    // that forgets to clear the seat would, with no change to this file, hand a
+    // stranger the held prose, canon, and a publish that mails their rewrite to
+    // every player. The review desk is safe on its own merits instead.
     if (action?.startsWith("/dm/")) {
       const seat = await getSeat(env.DB, campaign.id);
-      if (seat?.dmPlayerId !== session.playerId) {
+      if (!member || seat?.dmPlayerId !== session.playerId) {
         return fail(403, "only the DM can do that");
+      }
+
+      // Spec §8: the DM endpoints are rate-limited on the same mechanism as
+      // actions. `/dm/beat` writes up to 20 KB of prose per call, which makes
+      // an unbounded one the cheapest way in this API to make D1 do work.
+      //
+      // 30 a minute rather than `/action`'s 12: reviewing a turn is a burst —
+      // open the desk, reread, rewrite a paragraph, reread, publish — where
+      // submitting a turn is a single considered act. It is still an order of
+      // magnitude under what a script does and a large multiple of the busiest
+      // real minute. Keyed to the player and placed behind the seat check, so
+      // nobody else's refusals can spend the DM's budget for them.
+      if (!(await rateLimit(env, `dm:${session.playerId}`, 30))) {
+        return fail(429, "slow down a moment");
       }
 
       if (action === "/dm/review" && method === "GET") {

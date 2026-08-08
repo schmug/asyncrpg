@@ -355,6 +355,119 @@ describe("dm prose editing", () => {
     expect(page).not.toContain("Edited by the DM.");
   });
 
+  /**
+   * The seat is supposed to imply membership, and today it does: `/dm` is the
+   * only writer of the column and it refuses anyone who is not in the campaign.
+   * But that is an invariant enforced in a *different branch of a different
+   * check*, and `/dm/review` queries the beat deliberately unfiltered on the
+   * strength of it. The first "remove a player" path that forgets to clear the
+   * seat makes this state real, and then the review desk hands a stranger the
+   * held prose, the rewrite hands them canon, and publish mails their edit to
+   * every player. So the seat check is not the only thing standing there.
+   */
+  describe("a seat that outran its membership", () => {
+    beforeEach(async () => {
+      // Written straight to the column, because no code path produces this —
+      // that is the point of testing it.
+      await env.DB.prepare("UPDATE campaigns SET dm_player_id = ? WHERE id = ?")
+        .bind(OUTSIDER, campaignId)
+        .run();
+    });
+
+    it("refuses the review desk, and does not leak the held prose", async () => {
+      const res = await call("GET", `/api/campaigns/${SLUG}/dm/review`, OUTSIDER);
+      expect(res.status).toBe(403);
+      expect(await res.text()).not.toContain("The model wrote this.");
+    });
+
+    it("refuses the rewrite, and canon is untouched", async () => {
+      const res = await call("PATCH", `/api/campaigns/${SLUG}/dm/beat`, OUTSIDER, {
+        tick: 4,
+        prose: "I am not in this campaign and I rewrote your story.",
+      });
+      expect(res.status).toBe(403);
+      const row = await beat();
+      expect(row?.prose).toBe("The model wrote this.");
+      expect(row?.revised_by).toBeNull();
+    });
+
+    it("refuses publish, and no mail goes out", async () => {
+      const before = await mailCount();
+      const res = await call("POST", `/api/campaigns/${SLUG}/dm/publish`, OUTSIDER);
+      expect(res.status).toBe(403);
+      // Publication is the one DM action that reaches every player's inbox, so
+      // give any stray fan-out time to land and fail this rather than race past.
+      await new Promise((r) => setTimeout(r, 250));
+      expect(await mailCount()).toBe(before);
+      expect((await beat())?.published_at).toBeNull();
+    });
+
+    it("refuses the window", async () => {
+      const res = await call("PATCH", `/api/campaigns/${SLUG}/dm/window`, OUTSIDER, { ms: 0 });
+      expect(res.status).toBe(403);
+      expect(await windowMs()).toBeNull();
+    });
+
+    it("answers exactly as it answers a member without the seat", async () => {
+      // Neither refusal may be distinguishable from the other, or the 403 turns
+      // into an oracle for who is in the campaign.
+      const outsider = await call("GET", `/api/campaigns/${SLUG}/dm/review`, OUTSIDER);
+      const member = await call("GET", `/api/campaigns/${SLUG}/dm/review`, PLAYER);
+      expect(outsider.status).toBe(member.status);
+      expect(await outsider.text()).toBe(await member.text());
+    });
+  });
+
+  /**
+   * §8 of the design says the DM endpoints are rate-limited on the same
+   * mechanism as actions. `/dm/beat` writes up to 20 KB of prose per call, so
+   * unlimited it is the cheapest way in the whole API to make D1 do work.
+   */
+  describe("rate limiting", () => {
+    const minuteBucket = () => Math.floor(Date.now() / 60_000);
+
+    it("stops a DM hammering the endpoints, and the cap is 30 a minute", async () => {
+      // `rateLimit` counts within a wall-clock minute, so a burst that straddles
+      // a boundary is legitimately allowed to reset. Retry in that case rather
+      // than asserting on a coin flip.
+      for (let attempt = 0; attempt < 4; attempt++) {
+        await env.DB.prepare("DELETE FROM rate_limits").run();
+        const started = minuteBucket();
+        const codes: number[] = [];
+        for (let i = 0; i < 31; i++) {
+          const res = await call("PATCH", `/api/campaigns/${SLUG}/dm/beat`, DM, {
+            tick: 4,
+            prose: `Draft ${i}.`,
+          });
+          codes.push(res.status);
+        }
+        if (minuteBucket() !== started) continue;
+
+        expect(codes.slice(0, 30)).toEqual(Array<number>(30).fill(200));
+        expect(codes[30]).toBe(429);
+        // The refused call wrote nothing: the last accepted draft still stands.
+        expect((await beat())?.prose).toBe("Draft 29.");
+
+        // The budget belongs to the `/dm/` block, not to one endpoint — an
+        // exhausted DM cannot simply move to the review desk.
+        const review = await call("GET", `/api/campaigns/${SLUG}/dm/review`, DM);
+        expect(review.status).toBe(429);
+        expect(await review.text()).not.toContain("Draft 29.");
+        return;
+      }
+      throw new Error("the burst never completed inside a single rate-limit window");
+    });
+
+    it("does not spend a non-DM's refusal against the seat holder's budget", async () => {
+      // The limiter sits behind the authorisation check, so someone without the
+      // seat cannot burn the DM out of their own review desk.
+      for (let i = 0; i < 40; i++) {
+        expect((await call("GET", `/api/campaigns/${SLUG}/dm/review`, PLAYER)).status).toBe(403);
+      }
+      expect((await call("GET", `/api/campaigns/${SLUG}/dm/review`, DM)).status).toBe(200);
+    });
+  });
+
   describe("window configuration", () => {
     it("sets a window", async () => {
       const res = await call("PATCH", `/api/campaigns/${SLUG}/dm/window`, DM, { ms: 3_600_000 });

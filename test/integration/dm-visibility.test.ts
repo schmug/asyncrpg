@@ -161,6 +161,33 @@ describe("held beat visibility", () => {
       expect(await (await get(`/c/${SLUG}`, DM)).text()).toContain("The held turning point.");
     });
 
+    it("keeps events visible at a tick whose beat never projected", async () => {
+      // The timeline filter is deliberately "there is a beat and it is held"
+      // rather than the simpler-reading "there is a published beat". A tick
+      // whose narration failed to project has no beat row at all, so under the
+      // positive form its events match nothing and vanish — not from the held
+      // turn, from every chronicle in the install, retroactively and silently.
+      // This is the test that makes the double negative load-bearing.
+      const now = new Date().toISOString();
+      await env.DB.prepare(
+        `INSERT INTO events (campaign_id, event_id, tick, kind, summary, significance, created_at)
+         VALUES (?, 'ev_orphan', 3, 'battle', 'ORPHAN_TICK_EVENT', 80, ?)`,
+      )
+        .bind(campaignId, now)
+        .run();
+
+      // The premise, asserted rather than assumed: tick 3 has no beat at all.
+      const beats = await env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM beats WHERE campaign_id = ? AND tick = 3",
+      )
+        .bind(campaignId)
+        .first<{ n: number }>();
+      expect(beats?.n).toBe(0);
+
+      expect(await (await get(`/c/${SLUG}`)).text()).toContain("ORPHAN_TICK_EVENT");
+      expect(await (await get(`/c/${SLUG}`, PLAYER)).text()).toContain("ORPHAN_TICK_EVENT");
+    });
+
     it("never lets a personalised chronicle into a shared cache", async () => {
       // The DM's copy carries a beat nobody else may see. Served under the
       // anonymous page's `public, max-age=60` a shared cache would hand it to
@@ -265,6 +292,43 @@ describe("held beat visibility", () => {
       // DM holds the seat in the first campaign, and nothing in this one.
       const body = await (await get(`/c/other`, DM)).text();
       expect(body).not.toContain("Another held beat.");
+    });
+
+    it("does not let a held beat in one campaign blank another's timeline", async () => {
+      // The timeline's held-check is a *correlated* subquery, and the
+      // correlation on `campaign_id` is the whole of what keeps it local. Tick
+      // numbers are per-campaign counters, so a collision between two
+      // campaigns' tick 1 is the ordinary case, not an exotic one — drop the
+      // correlation and one campaign holding a beat blanks that tick from
+      // every other campaign's chronicle in the install.
+      const now = new Date().toISOString();
+      const other = `${campaignId}_held`;
+
+      // Campaign A's tick 1 is published, so its turning point is public.
+      await env.DB.prepare(
+        `INSERT INTO events (campaign_id, event_id, tick, kind, summary, significance, created_at)
+         VALUES (?, 'ev_a', 1, 'battle', 'CAMPAIGN_A_TURNING_POINT', 80, ?)`,
+      )
+        .bind(campaignId, now)
+        .run();
+
+      // Campaign B is holding a beat at the same tick number.
+      await env.DB.prepare(
+        `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
+         VALUES (?, 'held-elsewhere', 'Elsewhere', 'weekly', ?, ?)`,
+      )
+        .bind(other, PLAYER, now)
+        .run();
+      await env.DB.prepare(
+        `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at, published_at)
+         VALUES (?, 1, 'B is holding this.', 's', 'model', ?, NULL)`,
+      )
+        .bind(other, now)
+        .run();
+
+      const page = await (await get(`/c/${SLUG}`)).text();
+      expect(page).toContain("CAMPAIGN_A_TURNING_POINT");
+      expect(page).not.toContain("B is holding this.");
     });
   });
 
