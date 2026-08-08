@@ -81,10 +81,31 @@ function seedSession(label) {
   return { email, playerId, token };
 }
 
+/**
+ * A signed-in API call made outside the browser, as a given session token.
+ *
+ * The stale-draft check needs a second campaign that the browser's player is
+ * only a member of, which takes another account, a campaign, an invitation and
+ * a join. Driving all four through the UI would re-test the invite flow and
+ * add a minute to the run for a fixture, not a finding. The assertion that
+ * matters still happens in the browser.
+ */
+async function apiAs(token, path, body) {
+  const res = await fetch(`${BASE}${path}`, {
+    method: "POST",
+    headers: { "content-type": "application/json", cookie: `arpg_session=${token}` },
+    body: JSON.stringify(body ?? {}),
+  });
+  const out = await res.json().catch(() => null);
+  if (!res.ok) throw new Error(`POST ${path} → ${res.status} ${JSON.stringify(out).slice(0, 200)}`);
+  return out;
+}
+
 function cleanup() {
   try {
     d1(
       `DELETE FROM auth_tokens WHERE player_id IN (SELECT id FROM players WHERE email LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM memberships WHERE player_id IN (SELECT id FROM players WHERE email LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM events WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM beats WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
@@ -348,7 +369,18 @@ try {
     const dmTick = (await page.locator("#dm-tick").innerText()).trim();
     check("the panel names the turn that is waiting", /^\d+$/.test(dmTick), `turn ${dmTick}`);
     const windowLine = (await page.locator("#dm-window").innerText()).trim();
-    check("the DM is told it publishes itself if they do nothing", /publishes on its own/i.test(windowLine), windowLine);
+    // Deliberately not the bare phrase "publishes on its own". The app prints
+    // that phrase either way: with a deadline it says *when*, and without one
+    // it falls back to "Publishes on its own if you do nothing." A check that
+    // matched only the phrase passed just as happily with `windowClosesAt`
+    // deleted from the campaign GET — which made the field, and the
+    // `reviewState()` RPC that exists to produce it, ungated. The deadline is
+    // the thing under test, so the line must carry a time derived from it.
+    check(
+      "the DM is told when it publishes itself if they do nothing",
+      /publishes on its own (?:in \d+ (?:minute|hour|day)s?|any moment now) if you do nothing/i.test(windowLine),
+      windowLine,
+    );
     // Nobody but the seat holder has been told this turn exists yet, and the
     // panel has to say so — a DM who thinks it already went out will not edit.
     check("the held turn is labelled as unseen", /nobody has seen this/i.test(await page.locator("#dm-review label").innerText()));
@@ -382,6 +414,66 @@ try {
   check("all touch targets >= 44px tall (with beat and sheet)", touchIssues.length === 0, touchIssues.join("; "));
   a11y = await page.evaluate(A11Y_AUDIT);
   check("no accessibility issues (with beat and sheet)", a11y.length === 0, a11y.join("; "));
+
+  // ─── leaving the desk for a campaign you do not run ────────────────────
+  // Same page, same nodes. This is a single-page app, so moving from a
+  // campaign you run to one you only play in re-renders the DM panel instead
+  // of rebuilding it — and hiding the panel is not emptying it. The held
+  // prose of the campaign you left has no business still sitting in the DOM
+  // of the campaign you arrived at.
+  if (reviewVisible) {
+    console.log("\nmoving to a campaign you do not run:");
+    const guestSlug = `${slug}-two`;
+    const guest = seedSession("guest");
+    await apiAs(guest.token, "/api/campaigns", {
+      name: "UI Smoke Guest",
+      slug: guestSlug,
+      cadence: "weekly",
+    });
+    const invite = await apiAs(guest.token, `/api/campaigns/${guestSlug}/invite`);
+    const inviteToken = /#\/join\/([a-f0-9]{16,128})$/.exec(invite.url ?? "")?.[1] ?? "";
+    await apiAs(host.token, "/api/join", { token: inviteToken, name: "Visiting Player" });
+
+    await page.evaluate(`location.hash = '#/c/${guestSlug}'`);
+    await page.waitForFunction(
+      "document.getElementById('c-title')?.textContent === 'UI Smoke Guest'",
+      { timeout: 30_000 },
+    );
+    // The precondition, not decoration: if the viewer somehow ran this
+    // campaign too, the panel would be populated for a good reason and the
+    // assertion below would prove nothing.
+    check(
+      "the DM panel is not offered in a campaign you do not run",
+      !(await page.locator("#dm-box").isVisible()),
+    );
+    const leftBehind = await page.evaluate(`(() => {
+      const out = [];
+      for (const id of ['dm-prose', 'dm-tick', 'dm-window', 'dm-holder', 'dm-seat-to']) {
+        const el = document.getElementById(id);
+        // A textarea carries its draft on .value and a <select> its selected
+        // playerId, while the caption elements carry text — read both, so a
+        // field cannot look empty merely because it is the wrong kind of node.
+        const content = String(el.value ?? '') + (el.textContent ?? '');
+        if (content.trim()) out.push(id + '=' + content.trim().slice(0, 40));
+      }
+      return out;
+    })()`);
+    check(
+      "no held draft is left in the DOM after moving to a campaign you do not run",
+      leftBehind.length === 0,
+      leftBehind.join(" | "),
+    );
+    await page.screenshot({ path: `${OUT}/06c2-other-campaign.png`, fullPage: true });
+
+    // Emptying the panel must not be a one-way door: coming back has to put
+    // the DM at the desk they left, with the same turn still waiting.
+    await page.evaluate(`location.hash = '#/c/${slug}'`);
+    await page.waitForSelector("#dm-review:not([hidden])", { timeout: 30_000 });
+    check(
+      "returning to your own campaign restores the held turn",
+      (await page.locator("#dm-prose").inputValue()).length > 60,
+    );
+  }
 
   // ─── editing, then sending ─────────────────────────────────────────────
   if (reviewVisible) {

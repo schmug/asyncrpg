@@ -245,6 +245,21 @@ function renderCampaign(data) {
 }
 
 /**
+ * Every field the DM's panel writes, back to empty.
+ *
+ * Named once so the two paths that leave nothing to review — no held beat, and
+ * no panel at all — cannot drift apart, and so adding a field to the panel has
+ * one obvious place to be cleared from.
+ */
+function emptyDmPanel() {
+  $("dm-prose").value = "";
+  $("dm-tick").textContent = "";
+  $("dm-window").textContent = "";
+  $("dm-holder").textContent = "";
+  $("dm-seat-to").textContent = "";
+}
+
+/**
  * The DM's panel.
  *
  * Two audiences, deliberately not one. The seated DM gets the review desk: the
@@ -265,7 +280,15 @@ function renderDm(data) {
   const box = $("dm-box");
   const canMoveSeat = Boolean(data.isDm || data.isHost);
   box.hidden = !canMoveSeat;
-  if (!canMoveSeat) return;
+  if (!canMoveSeat) {
+    // Emptied on the way out, not only in the `else` below. This is a
+    // single-page app: navigating from a campaign you run to one you merely
+    // play in re-renders into the same nodes, and hiding the panel does not
+    // empty it. Leaving the previous campaign's held draft sitting in a
+    // hidden textarea makes the comment below a lie.
+    emptyDmPanel();
+    return;
+  }
 
   // A host who is not the DM is here for the seat control alone, and must not
   // be told they hold a chair they do not.
@@ -284,9 +307,9 @@ function renderDm(data) {
   } else {
     // Nothing to review means nothing left lying in the box: a stale draft here
     // would be published by the next tap of a button that is about to reappear.
-    $("dm-prose").value = "";
-    $("dm-tick").textContent = "";
-    $("dm-window").textContent = "";
+    // The holder line and the seat list this also clears are rewritten just
+    // below — they are facts about the campaign, not about the held beat.
+    emptyDmPanel();
   }
 
   const holder = data.campaign.cast.find((m) => m.playerId === data.dmPlayerId);
