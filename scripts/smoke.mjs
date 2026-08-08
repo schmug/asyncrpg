@@ -11,14 +11,58 @@
  * than through a test-only endpoint, so production ships no auth backdoor.
  * Every row it creates uses the SMOKE_PREFIX and is deleted at the end.
  *
- * Usage: node scripts/smoke.mjs [baseUrl] [--keep]
+ * Usage: node scripts/smoke.mjs [baseUrl] [--local|--remote] [--keep]
+ *
+ * `--remote` is the default, so the production gate is unchanged. `--local`
+ * points both halves of the suite at a `wrangler dev` on this machine: the D1
+ * seeding switches to `--local`, and the base URL defaults to port 8788.
+ * Both halves must agree — seeding a session into the remote database while
+ * asking a local worker to honour it produces a suite that fails for a reason
+ * that has nothing to do with the code — so the D1 flag is derived from the
+ * same switch as the URL rather than being a second thing to remember.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 
-const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
-const KEEP = process.argv.includes("--keep");
+// `wrangler --local` reads its D1 out of `.wrangler/` *relative to the working
+// directory*, so a run started from anywhere but the repo root would seed a
+// different (empty) database than the one `wrangler dev` is serving, and every
+// authenticated check would fail with a misleading 401. Pin it to the repo.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+const KNOWN_FLAGS = new Set(["--keep", "--local", "--remote"]);
+const argv = process.argv.slice(2);
+const flags = argv.filter((a) => a.startsWith("-"));
+const positional = argv.filter((a) => !a.startsWith("-"));
+
+// An unrecognised flag is fatal rather than ignored. The one thing this script
+// must never do is silently fall back to production because `--local` was
+// mistyped — `--Local`, `--loc`, or `-local` would otherwise parse as "no
+// flags given", i.e. `--remote`, and run the whole adversarial suite against
+// the live game.
+const unknown = flags.filter((f) => !KNOWN_FLAGS.has(f));
+if (unknown.length > 0) {
+  console.error(`unknown flag(s): ${unknown.join(", ")}`);
+  console.error("usage: node scripts/smoke.mjs [baseUrl] [--local|--remote] [--keep]");
+  process.exit(2);
+}
+if (flags.includes("--local") && flags.includes("--remote")) {
+  console.error("--local and --remote are mutually exclusive");
+  process.exit(2);
+}
+if (positional.length > 1) {
+  console.error(`expected at most one base URL, got: ${positional.join(", ")}`);
+  process.exit(2);
+}
+
+const LOCAL = flags.includes("--local");
+const KEEP = flags.includes("--keep");
+const D1_TARGET = LOCAL ? "--local" : "--remote";
+const DEFAULT_BASE = LOCAL ? "http://localhost:8788" : "https://play.cortech.online";
+const BASE = (positional[0] ?? DEFAULT_BASE).replace(/\/$/, "");
 const SMOKE_PREFIX = "zzsmoke";
 const stamp = randomBytes(4).toString("hex");
 
@@ -43,8 +87,8 @@ function d1Rows(sql) {
 function d1(sql) {
   return execFileSync(
     "npx",
-    ["wrangler", "d1", "execute", "asyncrpg", "--remote", "--json", "--command", sql],
-    { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    ["wrangler", "d1", "execute", "asyncrpg", D1_TARGET, "--json", "--command", sql],
+    { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"], cwd: REPO_ROOT },
   );
 }
 
@@ -115,7 +159,7 @@ function cleanup() {
 }
 
 async function main() {
-  console.log(`asyncrpg smoke — ${BASE}\n`);
+  console.log(`asyncrpg smoke — ${BASE} (d1 ${D1_TARGET})\n`);
 
   // ─── unauthenticated surface ─────────────────────────────────────────
   console.log("unauthenticated:");
@@ -320,6 +364,76 @@ async function main() {
   });
   check("the host can rebuild the chronicle from canonical state", hostReproject.status === 200);
 
+  // ─── the DM seat ─────────────────────────────────────────────────────────
+  // The seat is the only thing in the app that can rewrite what the group
+  // reads, so every one of these is a real escalation if it comes back 200.
+  // `host` created the campaign and therefore holds the seat; `outsider` is by
+  // now a full member who does not. That is exactly the pair these need: a
+  // refusal that only proves "you are not in this campaign" would say nothing
+  // about whether the seat is enforced.
+
+  const dmBeat = await req(`/api/campaigns/${slug}/dm/beat`, {
+    method: "PATCH",
+    cookie: outsider.cookie,
+    body: { tick: 1, prose: "I rewrite the story." },
+  });
+  check("a member without the seat cannot rewrite a beat", dmBeat.status === 403, `status ${dmBeat.status}`);
+
+  const dmPublish = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: outsider.cookie,
+  });
+  check("a member without the seat cannot publish", dmPublish.status === 403, `status ${dmPublish.status}`);
+
+  const dmSeize = await req(`/api/campaigns/${slug}/dm`, {
+    method: "POST",
+    cookie: outsider.cookie,
+    body: { playerId: outsider.playerId },
+  });
+  check(
+    "a member who is neither host nor DM cannot take the seat",
+    dmSeize.status === 403,
+    `status ${dmSeize.status}`,
+  );
+
+  const dmOutsider = await req(`/api/campaigns/${slug}/dm`, {
+    method: "POST",
+    cookie: host.cookie,
+    body: { playerId: `plr_${SMOKE_PREFIX}_nobody` },
+  });
+  check("cannot seat a player who is not a member", dmOutsider.status === 400, `status ${dmOutsider.status}`);
+
+  const dmAnon = await req(`/api/campaigns/${slug}/dm/review`, { method: "GET" });
+  check("the review desk needs a session", dmAnon.status === 401, `status ${dmAnon.status}`);
+
+  // A dropped, truncated, or oversized body used to read as "vacate" and
+  // answer 200, quietly leaving the campaign with no DM.
+  //
+  // All three shapes are sent, because they do not travel the same path
+  // through the handler: `{}` parses and is caught by the value check, while a
+  // missing body and an over-cap one both make `readJson` answer null and are
+  // caught by the envelope check. A fix to either one alone leaves the other
+  // vacating the seat, so testing only `{}` would miss half the defect.
+  for (const [label, body] of [
+    ["an empty body", {}],
+    ["a missing body", undefined],
+    ["an oversized body", JSON.stringify({ playerId: "x".repeat(64_000) })],
+  ]) {
+    const res = await req(`/api/campaigns/${slug}/dm`, { method: "POST", cookie: host.cookie, body });
+    check(`${label} is refused rather than read as vacate`, res.status === 400, `status ${res.status}`);
+  }
+  // The status alone does not prove the fix — a 400 that vacated anyway would
+  // pass every one of them — so the seat is read back out of D1 and must still
+  // be the host's.
+  const seatAfterEmpty = d1Rows(
+    `SELECT dm_player_id FROM campaigns WHERE id = '${esc(campaignId)}'`,
+  );
+  check(
+    "a refused seat write leaves the seat exactly where it was",
+    seatAfterEmpty[0]?.dm_player_id === host.playerId,
+    `dm_player_id=${seatAfterEmpty[0]?.dm_player_id ?? "null"} expected=${host.playerId}`,
+  );
+
   const dupSlug = await req("/api/campaigns", {
     method: "POST",
     cookie: host.cookie,
@@ -369,10 +483,85 @@ async function main() {
     body: { text: `<img src=x onerror="alert(1)"> I shout <b>loudly</b>.` },
   });
   await req(`/api/campaigns/${slug}/resolve`, { method: "POST", cookie: host.cookie });
+  // The creator holds the DM seat, so that resolve *held* the new beat instead
+  // of publishing it. Without releasing it first the chronicle below renders
+  // the previous turn, and the escaping assertion passes without the payload
+  // ever having been rendered — a check that proves nothing.
+  await req(`/api/campaigns/${slug}/dm/publish`, { method: "POST", cookie: host.cookie });
   const afterXss = await req(`/c/${slug}`);
   check(
     "player-authored markup is escaped in the chronicle",
     !afterXss.text.includes("<img src=x onerror") && !afterXss.text.includes("<b>loudly</b>"),
+  );
+
+  console.log("\nthe seat holds a beat until the DM publishes it:");
+  await req(`/api/campaigns/${slug}/action`, {
+    method: "POST",
+    cookie: host.cookie,
+    body: { text: "I set a lantern in the tower window and wait for an answer." },
+  });
+  await req(`/api/campaigns/${slug}/resolve`, { method: "POST", cookie: host.cookie });
+
+  const review = await req(`/api/campaigns/${slug}/dm/review`, { cookie: host.cookie });
+  check(
+    "the review desk shows the new beat, still held",
+    review.status === 200 && review.json?.beat?.held === true,
+    `status ${review.status} held=${review.json?.beat?.held}`,
+  );
+  const heldTick = review.json?.beat?.tick;
+
+  // A marker the machine could never have written, so its presence in the
+  // chronicle is proof the DM's text got there and not merely that *some*
+  // beat rendered. Kept to a realistic beat length: this becomes the campaign's
+  // latest beat, which the "the story is in-app" check further down measures.
+  const marker = `HELD${stamp}MARK`;
+  const edited = await req(`/api/campaigns/${slug}/dm/beat`, {
+    method: "PATCH",
+    cookie: host.cookie,
+    body: {
+      tick: heldTick,
+      prose:
+        `${marker} — the lantern burned in the tower window until dawn, and by first ` +
+        `light the watch had counted three riders on the north road who did not stop.`,
+    },
+  });
+  check("the DM can rewrite the held beat", edited.status === 200, `status ${edited.status}`);
+
+  const chronicleHeld = await req(`/c/${slug}`);
+  check(
+    "a held beat is not visible on the public chronicle",
+    chronicleHeld.status === 200 && !chronicleHeld.text.includes(marker),
+    `status ${chronicleHeld.status}`,
+  );
+
+  const published = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: host.cookie,
+  });
+  check(
+    "the DM can publish the held beat",
+    published.status === 200 && published.json?.published === true && published.json?.tick === heldTick,
+    `published=${published.json?.published} tick=${published.json?.tick} held=${heldTick}`,
+  );
+
+  // This is what keeps the check above from being satisfied by a chronicle
+  // that renders nothing at all: same marker, same URL, same anonymous reader,
+  // and the only thing that changed between the two is the publish.
+  const chronicleAfter = await req(`/c/${slug}`);
+  check(
+    "the same beat is visible to an anonymous reader once published",
+    chronicleAfter.status === 200 && chronicleAfter.text.includes(marker),
+    `status ${chronicleAfter.status}`,
+  );
+
+  const publishedAgain = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: host.cookie,
+  });
+  check(
+    "publishing twice does not publish twice",
+    publishedAgain.status === 200 && publishedAgain.json?.published === false,
+    `published=${publishedAgain.json?.published}`,
   );
 
   console.log("\ndeep play (optional, never an advantage):");
@@ -418,14 +607,30 @@ async function main() {
   );
 
   // Both token directions must be metered — input is the larger share here.
+  //
+  // A local `wrangler dev` has no ANTHROPIC_API_KEY, so no inference runs and
+  // there is no spend to meter. Asserting spend there would assert something
+  // false. The invariant that holds everywhere is the pairing of the two
+  // facts, so that is what is checked: metered spend must cover both
+  // directions, and an unmetered campaign must be one that was never narrated
+  // by the model. That still catches the dangerous bug — the model wrote the
+  // beat and nobody was billed — instead of skipping the check off-cloud.
   const budget = d1Rows(
     `SELECT input_tokens, output_tokens FROM token_budget WHERE campaign_id = '${esc(campaignId)}'`,
   );
-  check(
-    "inference spend is metered in both directions",
-    budget.length > 0 && budget[0].input_tokens > 0 && budget[0].output_tokens > 0,
-    JSON.stringify(budget[0] ?? {}),
-  );
+  if (budget.length > 0) {
+    check(
+      "inference spend is metered in both directions",
+      budget[0].input_tokens > 0 && budget[0].output_tokens > 0,
+      JSON.stringify(budget[0]),
+    );
+  } else {
+    check(
+      "an unmetered campaign is one the model never narrated",
+      resolved.json?.source === "templated",
+      `no token_budget row, and narration source=${resolved.json?.source}`,
+    );
+  }
 
   const killSwitch = d1Rows(`SELECT value FROM settings WHERE key = 'inference_enabled'`);
   check("a global inference kill switch exists", killSwitch.length === 1, JSON.stringify(killSwitch[0] ?? {}));
