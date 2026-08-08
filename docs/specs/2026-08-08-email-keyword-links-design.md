@@ -232,9 +232,18 @@ never straddle an escape sequence and nothing is double-escaped.
 Link style is deliberately quiet:
 
 ```
-color:inherit;text-decoration:underline;
+color:#1c1a17;text-decoration:underline;
 text-decoration-color:#c9b9a5;text-underline-offset:2px
 ```
+
+> **Amended 2026-08-08 after review.** This was originally `color:inherit`.
+> Outlook desktop's Word rendering engine does not support `inherit`, so the
+> anchors would have fallen back to default blue there — eight of them, which
+> is exactly the link-density outcome the cap in §6 exists to prevent. The
+> explicit hex is the body colour already set on the wrapping `<div>`, so it
+> renders identically in every other client. The two `text-decoration-*`
+> properties are also unsupported by that engine, but they degrade to a plain
+> underline, which is acceptable.
 
 A faint underline reads as *reference*, not *call to action*. The existing
 accent-coloured "Read the chronicle" link remains the one loud link.
@@ -305,8 +314,24 @@ Tests are written before the implementation, per the repo's loop.
 - text part carries the who's-who block with resolvable URLs
 - **zero mentions ⇒ output identical to the pre-change baseline**
 - prose containing `&` and `<` stays correctly escaped around a link
-- **an entity named `<script>alert(1)</script>` yields no raw tag in either
-  MIME part** — moved here from the `mentions` list above
+- **an entity named `<script>alert(1)</script>` yields no raw tag in the HTML
+  part**, and the **text part carries no markup and no entity escaping at all**
+
+> **Corrected 2026-08-08 after review.** This bullet originally said "no raw tag
+> in **either** MIME part". That was wrong. The text part is `text/plain`;
+> prose already reaches it raw today, and HTML-escaping it would show a reader
+> the literal `&quot;Iron Spears&quot; &amp; 3` where the DM wrote
+> `"Iron Spears" & 3`. It would also break the byte-identity invariant, since a
+> zero-mention beat containing an apostrophe would start emitting `&#39;`.
+>
+> There is no threat to escape away: in `multipart/alternative` a conforming
+> client displays one part, and a client that selects `text/plain` renders
+> bytes as text by definition of the media type. Any client capable of
+> interpreting markup selects the HTML part instead — which is escaped.
+>
+> The delivered assertion is *stronger* than the original wording: "no raw tag"
+> would have been satisfied by double-escaping the prose, whereas "no markup
+> **and** no entity escaping" pins the text part exactly.
 
 **`test/web/dossier.test.ts`**
 
