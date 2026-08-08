@@ -27,11 +27,13 @@ const ctx = { waitUntil() {}, passThroughOnException() {} } as unknown as Execut
 /**
  * A fresh Durable Object per test.
  *
- * The workers pool rolls D1 back between tests but *not* Durable Object
- * storage. The router names the object from `campaigns.id`, so — unlike a test
- * that builds the stub itself — the only way to get a virgin object through
- * `worker.fetch` is to vary the campaign id. The *slug* stays fixed, because
- * that is what the URLs in these tests say.
+ * Neither D1 nor Durable Object storage is isolated between tests in this pool
+ * — `vitest.config.ts` sets no `isolatedStorage`, so both persist and both must
+ * be reset explicitly. `seed()` handles D1 via `resetDatabase`; for the object,
+ * the router names it from `campaigns.id`, so — unlike a test that builds the
+ * stub itself — the only way to get a virgin one through `worker.fetch` is to
+ * vary the campaign id. The *slug* stays fixed, because that is what the URLs
+ * in these tests say.
  */
 let campaignId = "cmp_vis";
 let seq = 0;
@@ -143,6 +145,24 @@ describe("held beat visibility", () => {
       const body = await (await get(`/c/${SLUG}`, DM)).text();
       expect(body).toContain("The held beat.");
       expect(body).toContain("held for review");
+    });
+
+    it("does not extend the DM exception to a seat holder who is not a member", async () => {
+      // No code path produces this state — `setSeat` is the only writer of
+      // `dm_player_id` and it checks membership. That is exactly why the state
+      // has to be forced here: the chronicle must not depend on an invariant
+      // enforced in a different file. The `/dm/` endpoints stopped trusting the
+      // seat alone; this is the same property on the read path, which is the
+      // one that renders held prose to the open internet.
+      await env.DB.prepare("UPDATE campaigns SET dm_player_id = ? WHERE id = ?")
+        .bind(OUTSIDER, campaignId)
+        .run();
+
+      const body = await (await get(`/c/${SLUG}`, OUTSIDER)).text();
+      expect(body).toContain("The published beat.");
+      expect(body).not.toContain("The held beat.");
+      expect(body).not.toContain("held for review");
+      expect(body).not.toContain("The held turning point.");
     });
 
     it("counts only published turns for everyone but the DM", async () => {

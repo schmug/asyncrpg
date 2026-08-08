@@ -184,12 +184,21 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   if (chronicleMatch && method === "GET") {
     const campaign = await campaignBySlug(env, chronicleMatch[1]!);
     if (!campaign) return new Response("No such chronicle.", { status: 404 });
-    if (campaign.public_chronicle !== 1 && !(session && (await isMember(env, campaign.id, session.playerId)))) {
+    const memberHere = session ? await isMember(env, campaign.id, session.playerId) : false;
+    if (campaign.public_chronicle !== 1 && !memberHere) {
       return new Response("This chronicle is private.", { status: 403 });
     }
     // The reader is passed through so the chronicle can make the one exception
     // it has to make: the DM sees the beat they are holding, nobody else does.
-    return renderChronicle(env, campaign, session?.playerId ?? null);
+    //
+    // Only a *member* is offered as that reader. The seat alone is not enough,
+    // for the same reason the `/dm/` block stopped trusting it: `setSeat` is the
+    // only writer today and it checks membership, but that is an invariant
+    // enforced in another file, and the day someone adds a leave-a-campaign path
+    // that forgets to clear the seat, this would hand a stranger the held beat.
+    // Private chronicles already paid for this lookup, so it is free there and
+    // one `SELECT 1` for a signed-in reader of a public one.
+    return renderChronicle(env, campaign, memberHere ? session!.playerId : null);
   }
 
   // ─── joining by invitation ─────────────────────────────────────────────
