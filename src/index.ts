@@ -267,11 +267,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
   }
 
-  // Up to two segments, because the DM endpoints are nested (`/dm/beat`,
-  // `/dm/window`). Group 2 still captures the whole action with its leading
-  // slash — `/invite`, `/action`, `/dm/window` — so every `action === "/…"`
-  // comparison below is unaffected by the widening.
-  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})((?:\/[a-z]+){0,2})?$/.exec(path);
+  // A second segment is allowed under `/dm` and nowhere else, because the DM
+  // endpoints are the only nested ones (`/dm/beat`, `/dm/window`). A blanket
+  // "up to two segments" would also route `/invite/extra` and `/resolve/now`,
+  // turning a 404 into a 405 for every action — an API-surface change nothing
+  // asked for. Group 2 captures the whole action with its leading slash —
+  // `/invite`, `/action`, `/dm/window` — so every `action === "/…"` comparison
+  // below is unaffected.
+  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})(\/dm\/[a-z]+|\/[a-z]+)?$/.exec(path);
   if (campaignMatch) {
     const campaign = await campaignBySlug(env, campaignMatch[1]!);
     if (!campaign) return fail(404, "no such campaign");
@@ -303,12 +306,22 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       const isDm = seat?.dmPlayerId === session.playerId;
       if (!isHost && !isDm) return fail(403, "only the host or the current DM can move the seat");
 
-      // `readJson` is an unchecked cast over network input, so the shape has to
-      // be checked here rather than trusted. Handing D1 a non-string to bind
-      // throws inside the driver, which would surface a malformed request as a
-      // 500. An absent `playerId` means vacate, the same as an explicit null.
-      const body = await readJson<{ playerId?: unknown }>(request);
-      const target = body?.playerId ?? null;
+      // Vacating has to be something the caller *said*, never something the
+      // request failed to say. `readJson` returns `null` for an unparseable
+      // body and, identically, for one over the size cap — so treating an
+      // absent `playerId` as "vacate" would let a dropped body, a proxy that
+      // stripped it, a truncated retry, or a body that grew past 32 KB empty
+      // the seat and answer 200 OK. Only an explicit `{ playerId: null }`
+      // vacates; anything that is not an object carrying that key is a 400.
+      const body = await readJson<Record<string, unknown>>(request);
+      if (body === null || typeof body !== "object" || Array.isArray(body) || !("playerId" in body)) {
+        return fail(400, "send { playerId }, or { playerId: null } to vacate the seat");
+      }
+      // Still an unchecked cast over network input past this point: the key is
+      // present, but its value is whatever the caller sent. Handing D1 a
+      // non-string to bind throws inside the driver, surfacing a malformed
+      // request as a 500.
+      const target = body.playerId;
       if (target !== null) {
         if (typeof target !== "string") {
           return fail(400, "playerId must be a player id, or null to vacate the seat");

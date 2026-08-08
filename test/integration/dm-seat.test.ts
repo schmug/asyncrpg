@@ -25,15 +25,25 @@ const execCtx = { waitUntil() {}, passThroughOnException() {} } as unknown as Ex
 
 async function call(
   path: string,
-  init: { method?: string; playerId?: string; body?: unknown } = {},
+  init: { method?: string; playerId?: string; body?: unknown; raw?: string } = {},
 ): Promise<Response> {
   const headers: Record<string, string> = { "content-type": "application/json" };
   if (init.playerId) headers.cookie = await mintSessionForTest(env, init.playerId);
+  // `raw` sends the bytes verbatim. Several tests below need a body that
+  // `JSON.stringify` cannot produce — empty, non-JSON, or a bare literal —
+  // and those are exactly the shapes a dropped body or a stripping proxy
+  // delivers, so they cannot be tested through the object path.
+  const body =
+    init.raw !== undefined
+      ? init.raw
+      : init.body === undefined
+        ? undefined
+        : JSON.stringify(init.body);
   return worker.fetch(
     new Request(`https://example.com${path}`, {
       method: init.method ?? "GET",
       headers,
-      ...(init.body === undefined ? {} : { body: JSON.stringify(init.body) }),
+      ...(body === undefined ? {} : { body }),
     }),
     env,
     execCtx,
@@ -211,15 +221,72 @@ describe("dm seat", () => {
       await setSeat(env.DB, CAMPAIGN, "plr_two");
       const res = await post("plr_host", { playerId: null });
       expect(res.status).toBe(200);
+      expect(await res.json()).toEqual({ ok: true, dmPlayerId: null });
       expect((await getSeat(env.DB, CAMPAIGN))?.dmPlayerId).toBeNull();
     });
+
+    /**
+     * Vacating the seat must be something the caller *said*, never something
+     * the request failed to say. `readJson` returns `null` for an unparseable
+     * body and, identically, for an oversized one — so `body?.playerId ?? null`
+     * collapsed every shape below into "vacate the seat" and answered 200 OK.
+     * A dropped body, a proxy that stripped it, a truncated retry, or a body
+     * that grew past the 32 KB cap would all silently empty the seat and report
+     * success. The contract (docs/specs/2026-08-08-dm-role-design.md §8) is
+     * that only an explicit `{ playerId: null }` vacates; absent, malformed,
+     * or oversized is a 400.
+     */
+    const MALFORMED: Array<[string, { body?: unknown; raw?: string }]> = [
+      ["an empty object", { body: {} }],
+      ["no body at all", {}],
+      ["an empty body", { raw: "" }],
+      ["a body that is not JSON", { raw: "not json at all" }],
+      ["a JSON null", { raw: "null" }],
+      ["a JSON true", { raw: "true" }],
+      ["a JSON array", { raw: '["plr_two"]' }],
+      ["a JSON string", { raw: '"plr_two"' }],
+      ["a JSON number", { raw: "42" }],
+      ["a misspelled key", { body: { player_id: "plr_two" } }],
+      // The worst of the set: well-formed, correct key, correct value — and
+      // still discarded whole, because it crossed `readJson`'s size cap.
+      [
+        "an oversized but otherwise well-formed body",
+        { raw: `{"playerId":"plr_two","pad":"${"x".repeat(40_000)}"}` },
+      ],
+    ];
+
+    for (const [label, init] of MALFORMED) {
+      it(`rejects ${label} rather than vacating the seat`, async () => {
+        await setSeat(env.DB, CAMPAIGN, "plr_two");
+        const res = await call("/api/campaigns/seat/dm", {
+          method: "POST",
+          playerId: "plr_host",
+          ...init,
+        });
+        expect(res.status, label).toBe(400);
+        expect(await res.json(), label).toEqual({
+          error: "send { playerId }, or { playerId: null } to vacate the seat",
+        });
+        // The assertion that actually matters: the seat is where it was.
+        expect((await getSeat(env.DB, CAMPAIGN))?.dmPlayerId, label).toBe("plr_two");
+      });
+    }
 
     it("rejects a playerId that is not a string instead of failing at the driver", async () => {
       // `readJson` is an unchecked cast over network input. Handing D1 an
       // object to bind throws inside the driver and surfaces as a 500, which
-      // is the wrong answer to a malformed request.
-      const res = await post("plr_host", { playerId: { toString: "plr_two" } });
-      expect(res.status).toBe(400);
+      // is the wrong answer to a malformed request. Distinct from the shapes
+      // above: the key *is* present, so this is a bad value rather than a bad
+      // envelope, and it earns its own message.
+      await setSeat(env.DB, CAMPAIGN, "plr_two");
+      for (const playerId of [{ toString: "plr_two" }, 42, true, ["plr_two"]]) {
+        const res = await post("plr_host", { playerId });
+        expect(res.status, JSON.stringify(playerId)).toBe(400);
+        expect(await res.json(), JSON.stringify(playerId)).toEqual({
+          error: "playerId must be a player id, or null to vacate the seat",
+        });
+      }
+      expect((await getSeat(env.DB, CAMPAIGN))?.dmPlayerId).toBe("plr_two");
     });
 
     it("refuses an unauthenticated caller", async () => {
@@ -328,11 +395,38 @@ describe("dm seat", () => {
       // What the widening is for: `/dm/window` and `/dm/beat` land in Tasks 4
       // and 6. Until then they must 405 from inside the branch, not 404 from
       // outside it — that is the difference the regex makes.
-      const res = await call("/api/campaigns/seat/dm/window", {
-        method: "POST",
-        playerId: "plr_two",
-      });
-      expect(res.status).toBe(405);
+      for (const path of ["/api/campaigns/seat/dm/window", "/api/campaigns/seat/dm/beat"]) {
+        const res = await call(path, { method: "POST", playerId: "plr_two" });
+        expect(res.status, path).toBe(405);
+      }
+    });
+
+    it("only allows a second segment under /dm", async () => {
+      // A blanket "up to two segments" quietly enlarged the API surface: every
+      // action gained a nested form that 405s where it used to 404. That is a
+      // behaviour change nobody asked for, and it turns typos and probes into
+      // "this endpoint exists, wrong method". The nesting belongs to `/dm`
+      // alone, so everything else must 404 exactly as it did before.
+      for (const path of [
+        "/api/campaigns/seat/invite/extra",
+        "/api/campaigns/seat/action/x",
+        "/api/campaigns/seat/resolve/now",
+        "/api/campaigns/seat/downtime/extra",
+        "/api/campaigns/seat/letter/x",
+        "/api/campaigns/seat/journal/x",
+        "/api/campaigns/seat/reproject/now",
+      ]) {
+        const res = await call(path, { method: "POST", playerId: "plr_two" });
+        expect(res.status, path).toBe(404);
+        expect(await res.json(), path).toEqual({ error: "no such endpoint" });
+      }
+    });
+
+    it("does not route a third segment, even under /dm", async () => {
+      for (const path of ["/api/campaigns/seat/dm/window/extra", "/api/campaigns/seat/dm/dm/beat/x"]) {
+        const res = await call(path, { method: "POST", playerId: "plr_two" });
+        expect(res.status, path).toBe(404);
+      }
     });
 
     it("does not route a path with an uppercase or numeric action segment", async () => {
