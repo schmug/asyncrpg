@@ -157,7 +157,11 @@ describe("event projection — the real DO", () => {
   // `reproject` -> `#writeEvents` — through the real `CampaignDO` RPC.
   const CAMPAIGN_ID = "cmp_projection_do";
 
-  it("resolveTick writes real target_ids, and reproject repairs a stale row", async () => {
+  // Generous on purpose. This drives a real Durable Object through genesis, a
+  // full tick, and a reproject; ~3.5s alone is legitimate work, not a hang, and
+  // it sat close enough to the 5s default to time out once under parallel load.
+  // A slow-but-correct integration test must not be tuned to the default's edge.
+  it("resolveTick writes real target_ids, and reproject repairs a stale row", { timeout: 20_000 }, async () => {
     const stub = env.CAMPAIGN.get(env.CAMPAIGN.idFromName(CAMPAIGN_ID));
 
     await stub.init({

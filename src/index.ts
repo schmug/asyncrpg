@@ -27,6 +27,7 @@ import type { Session } from "./auth";
 import { sendMagicLink } from "./email/outbound";
 import { handleInboundEmail } from "./email/inbound";
 import { renderChronicle } from "./web/chronicle";
+import { renderDossier } from "./web/dossier";
 import type { Env } from "./env";
 
 export { CampaignDO };
@@ -187,6 +188,20 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       return new Response("This chronicle is private.", { status: 403 });
     }
     return renderChronicle(env, campaign);
+  }
+
+  // ─── one entity's dossier (same access rule as the chronicle) ──────────
+  // `chr_` is deliberately absent: characters are not linked from mail, so the
+  // page would be unreachable, and a character's disclosure story is separate.
+  const dossierMatch =
+    /^\/c\/([a-z0-9-]{2,31})\/who\/((?:rgn|stl|fac|npc|thr)_[a-z0-9_-]{1,40})\/?$/.exec(path);
+  if (dossierMatch && method === "GET") {
+    const campaign = await campaignBySlug(env, dossierMatch[1]!);
+    if (!campaign) return new Response("No such chronicle.", { status: 404 });
+    if (campaign.public_chronicle !== 1 && !(session && (await isMember(env, campaign.id, session.playerId)))) {
+      return new Response("This chronicle is private.", { status: 403 });
+    }
+    return renderDossier(env, campaign, dossierMatch[2]!);
   }
 
   // ─── joining by invitation ─────────────────────────────────────────────

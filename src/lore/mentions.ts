@@ -91,11 +91,41 @@ function str(value: unknown): string {
   return typeof value === "string" ? value : "";
 }
 
+/**
+ * A 0-100 field that is actually present.
+ *
+ * `sizeLabel` and `dangerLabel` band from the bottom, so an absent number does
+ * not fail — it falls through every threshold and comes back "a hamlet" or
+ * "quiet". Absence is not zero, and a band asserted from a gap in a row is a
+ * fabricated fact about the world.
+ */
+function present(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value);
+}
+
 /** The display name of a referenced row, or "" when the reference is unusable. */
 function nameOf(row: { name?: unknown } | undefined): string {
   return typeof row?.name === "string" ? row.name : "";
 }
 
+/**
+ * One line describing an entity, or `""` when it cannot be described.
+ *
+ * Two kinds of missing field arrive here, and they are not interchangeable:
+ *
+ * - Absence that would become a **positive claim** — `alive`, `population`,
+ *   `danger`. `!n.alive` reads an absent field as *dead*, and the banding
+ *   helpers report "a hamlet" and "quiet" for a number that is not there. Each
+ *   is a fact invented out of a gap in a row, published on a page whose only
+ *   job is answering "who is this?", with the chronicle beside it saying
+ *   otherwise. Guarded below: no field, no blurb.
+ * - Absence that merely **drops a clause** — `defunct`, `resolved`,
+ *   `seatSettlementId`, `factionId`, `regionId`. Nothing is asserted; the
+ *   description is thinner. Left alone, because a guard there would be the
+ *   defensive padding this module deliberately avoids.
+ *
+ * Callers must read `""` as *omit the subtitle*, never as an empty element.
+ */
 export function blurbFor(kind: LinkableKind, id: string, state: WorldState): string {
   switch (kind) {
     case "faction": {
@@ -110,6 +140,9 @@ export function blurbFor(kind: LinkableKind, id: string, state: WorldState): str
     case "npc": {
       const n = own(state.npcs, id);
       if (!n) return "";
+      // Absent is not false. Death is the most consequential thing this page
+      // can say about a person, so it is claimed only from an actual `false`.
+      if (typeof n.alive !== "boolean") return "";
       const role = str(n.role);
       if (!n.alive) return role ? `${role} · died` : "died";
       const faction = nameOf(own(state.factions, n.factionId));
@@ -125,6 +158,7 @@ export function blurbFor(kind: LinkableKind, id: string, state: WorldState): str
       const s = own(state.settlements, id);
       if (!s) return "";
       if (s.razed) return "abandoned";
+      if (!present(s.population)) return "";
       const region = nameOf(own(state.regions, s.regionId));
       const size = sizeLabel(s.population);
       return region ? `${size} in ${region}` : size;
@@ -133,7 +167,8 @@ export function blurbFor(kind: LinkableKind, id: string, state: WorldState): str
       const r = own(state.regions, id);
       if (!r) return "";
       const terrain = str(r.terrain);
-      return terrain ? `${terrain} · ${dangerLabel(r.danger)}` : "";
+      if (!terrain || !present(r.danger)) return "";
+      return `${terrain} · ${dangerLabel(r.danger)}`;
     }
     case "threat": {
       const t = own(state.threats, id);
