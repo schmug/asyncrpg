@@ -24,6 +24,7 @@ import { promptFor } from "./dm/fallback";
 import type { Beat, BudgetGuard, DmConfig } from "./dm/narrate";
 import { sendBeat } from "./email/outbound";
 import type { Env } from "./env";
+import { scanProse } from "./lore/mentions";
 import type { PlayerAction, WorldEvent, WorldState } from "./sim/types";
 
 interface PendingRow extends Record<string, SqlStorageValue> {
@@ -563,6 +564,10 @@ export class CampaignDO extends DurableObject<Env> {
       beat.prose.split("\n").find((l) => l.trim().length > 0)?.slice(0, 70) ??
       `${state.season} of year ${state.year}`;
 
+    // Every member gets the same prose, so scan once per tick rather than once
+    // per player. Pure and cheap, but there is no reason to do it N times.
+    const scan = scanProse(beat.prose, state);
+
     for (const member of members.results ?? []) {
       const character = Object.values(state.characters).find((c) => c.playerId === member.player_id);
       if (!character) continue;
@@ -583,6 +588,7 @@ export class CampaignDO extends DurableObject<Env> {
         prompt: promptFor(character, state),
         recap: result.recaps[character.id],
         actedForYou: auto ? auto.action.intent : null,
+        scan,
       });
     }
   }

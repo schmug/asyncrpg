@@ -216,6 +216,27 @@ export const MAX_MENTIONS = 8;
 /** Below this, a name matches too much ordinary text to be worth linking. */
 const MIN_NAME_LENGTH = 4;
 
+/**
+ * A linkable name may not contain a line break.
+ *
+ * This is the guarantee `src/email/outbound.ts` relies on. That renderer
+ * assembles the linked HTML from segments and *then* splits it into paragraphs
+ * on `\n{2,}`, which is only sound if an anchor can never contain a newline.
+ * Nothing else enforces it: `escapeRegExp` escapes regex metacharacters, so a
+ * literal newline in a name survives into the pattern and matches across a
+ * blank line quite happily, yielding
+ * `<p>Then <a …>Ashen</p><p>Coil</a> arrived.</p>` — an anchor opened in one
+ * paragraph and closed in the next.
+ *
+ * Names come from `NameForge` at genesis today, so this is unreachable — but
+ * `entities.name` is an untyped D1 TEXT column, and a rename feature or a
+ * `WorldState` rebuilt from projected rows walks straight into it. Enforcing
+ * the guarantee at the one place a name becomes linkable is cheaper than
+ * re-deriving segment offsets per paragraph downstream, and a name carrying a
+ * line break cannot be legitimately linked in any case.
+ */
+const LINE_BREAK = /[\r\n]/;
+
 function escapeRegExp(value: string): string {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
@@ -259,7 +280,9 @@ function candidates(state: WorldState): Candidate[] {
         typeof c.id === "string" &&
         c.id.length > 0 &&
         typeof c.name === "string" &&
-        c.name.length >= MIN_NAME_LENGTH,
+        c.name.length >= MIN_NAME_LENGTH &&
+        // Keeps every anchor the email renderer builds within one paragraph.
+        !LINE_BREAK.test(c.name),
     )
     // Longest first, so `House Vresk` claims its span before `Vresk` is tried.
     .sort((a, b) => b.name.length - a.name.length);

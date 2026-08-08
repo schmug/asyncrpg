@@ -497,6 +497,33 @@ describe("scanProse", () => {
     expect(scanProse("They rode to VresXford (Old) at dawn.", odd).mentions).toEqual([]);
   });
 
+  it("never matches a name containing a newline", () => {
+    // `escapeRegExp` escapes regex metacharacters only, so a literal newline in
+    // a name stays a literal newline in the pattern and really does match
+    // across a blank line. The email renderer assembles linked HTML and *then*
+    // splits it into paragraphs on `\n{2,}`, so such a match would open an
+    // anchor in one `<p>` and close it in the next — structurally broken HTML.
+    // The guarantee that makes that split safe is enforced here, at the only
+    // place a name becomes linkable, rather than assumed downstream.
+    for (const name of ["Ashen\n\nCoil", "Ashen\nCoil", "Ashen\r\nCoil"]) {
+      const broken = world();
+      broken.factions.fac_0!.name = name;
+      const { mentions, segments } = scanProse(`Then ${name} arrived.`, broken);
+      expect(mentions).toEqual([]);
+      expect(rejoin(segments)).toBe(`Then ${name} arrived.`);
+    }
+  });
+
+  it("still matches a name carrying ordinary internal whitespace", () => {
+    // The newline rule must not become a whitespace rule: real names are
+    // multi-word, and `NameForge` produces them with spaces.
+    const spaced = world();
+    spaced.factions.fac_0!.name = "The  Ashen  Coil";
+    expect(scanProse("Then The  Ashen  Coil arrived.", spaced).mentions.map((m) => m.id)).toEqual([
+      "fac_0",
+    ]);
+  });
+
   it("returns empty for empty prose and for a world with nothing in it", () => {
     expect(scanProse("", w)).toEqual({ mentions: [], segments: [] });
     const bare = world();
