@@ -9,7 +9,7 @@
  */
 
 import { shortCode } from "../auth";
-import type { Env } from "../env";
+import type { EmailSendMessage, Env } from "../env";
 import { buildSubject, INBOX_LOCAL } from "./parse";
 
 export function escapeHtml(value: string): string {
@@ -31,6 +31,50 @@ function paragraphs(text: string): string {
 function messageId(domain: string): string {
   const rand = crypto.randomUUID();
   return `${rand}@${domain}`;
+}
+
+/**
+ * Hand one message to the binding, with a single retry.
+ *
+ * The one place in this file that talks to the mail provider. Most send
+ * failures are transient (rate limit, upstream blip), and dropping a message on
+ * the first stumble loses a player their turn. A second failure is logged —
+ * never thrown, and never silent: swallowing it without a line makes a total
+ * mail outage invisible while every dashboard stays green.
+ *
+ * Returns the threading id the provider assigned, or `null` if nothing was
+ * sent. `null` inside the wrapper means "the provider accepted the message but
+ * named no id", which is a different thing and is why the return is nested.
+ */
+async function sendWithRetry(
+  env: Env,
+  message: EmailSendMessage,
+  context: string,
+): Promise<{ assignedMessageId: string | null } | null> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
+      // ("Only whitelisted headers and X-* headers are accepted"), so the
+      // threading id cannot be chosen by us — it is assigned at send time and
+      // read back off the response.
+      const sent = (await env.EMAIL.send(message)) as
+        | { messageId?: string; message_id?: string; id?: string }
+        | undefined;
+      const raw = sent?.messageId ?? sent?.message_id ?? sent?.id ?? null;
+      return { assignedMessageId: raw ? raw.replace(/^<|>$/g, "") : null };
+    } catch (err) {
+      if (attempt === 0) {
+        await new Promise((r) => setTimeout(r, 750));
+        continue;
+      }
+      console.error(
+        `email send failed after retry ${context}:`,
+        err instanceof Error ? err.message : String(err),
+      );
+      return null;
+    }
+  }
+  return null;
 }
 
 export interface BeatMail {
@@ -92,22 +136,13 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
     `</div>`;
 
-  let assignedMessageId: string | null = null;
-  let lastError: unknown = null;
-
-  // One retry. Most send failures are transient (rate limit, upstream blip),
-  // and the beat is the product's primary channel — dropping it on the first
-  // stumble loses a player their turn. A second failure is logged and the
-  // player still has the web copy.
-  for (let attempt = 0; attempt < 2; attempt++) {
-  try {
-    // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
-    // ("Only whitelisted headers and X-* headers are accepted"), so the
-    // threading id cannot be chosen by us — it is assigned at send time and
-    // read back off the response. The `X-Asyncrpg-*` headers below are for
-    // operators reading raw mail; replies never echo them, so they play no
-    // part in binding.
-    const sent = (await env.EMAIL.send({
+  // A delivery failure must not stop the tick — the beat is already stored and
+  // readable on the web, and the next tick's mail carries the player forward.
+  // The `X-Asyncrpg-*` headers are for operators reading raw mail; replies
+  // never echo them, so they play no part in binding.
+  const result = await sendWithRetry(
+    env,
+    {
       to: mail.toEmail,
       from: { email: `dm@${domain}`, name: mail.campaignName },
       replyTo,
@@ -118,31 +153,11 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
         "X-Asyncrpg-Campaign": mail.campaignSlug,
         "X-Asyncrpg-Tick": String(mail.tick),
       },
-    })) as { messageId?: string; message_id?: string; id?: string } | undefined;
-
-    const raw = sent?.messageId ?? sent?.message_id ?? sent?.id ?? null;
-    assignedMessageId = raw ? raw.replace(/^<|>$/g, "") : null;
-    lastError = null;
-    break;
-  } catch (err) {
-    lastError = err;
-    if (attempt === 0) {
-      await new Promise((r) => setTimeout(r, 750));
-      continue;
-    }
-    // A delivery failure must not stop the tick — the beat is already stored
-    // and readable on the web, and the next tick's mail carries the player
-    // forward. But it must not be *silent*: swallowing this without a log
-    // makes a total mail outage invisible, which is the one failure mode that
-    // breaks the product's primary channel while every dashboard stays green.
-    console.error(
-      `email send failed after retry campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
-      err instanceof Error ? err.message : String(err),
-    );
-    return null;
-  }
-  }
-  if (lastError) return null;
+    },
+    `campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}`,
+  );
+  if (!result) return null;
+  const assignedMessageId = result.assignedMessageId;
 
   try {
     await env.DB.prepare(
@@ -176,6 +191,102 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     return { code };
   }
   return { code };
+}
+
+export function reviewNoticeSubject(campaignName: string, tick: number): string {
+  return `[${campaignName}] Turn ${tick} is ready for you`;
+}
+
+export interface ReviewNotice {
+  campaignName: string;
+  campaignSlug: string;
+  tick: number;
+  prose: string;
+  closesAt: number;
+  origin: string;
+}
+
+function reviewUrl(opts: ReviewNotice): string {
+  return `${opts.origin}/#/c/${encodeURIComponent(opts.campaignSlug)}/review`;
+}
+
+export function reviewNoticeBody(opts: ReviewNotice): string {
+  const closes = new Date(opts.closesAt).toUTCString();
+  return [
+    `Turn ${opts.tick} of ${opts.campaignName} has resolved. Nobody has seen it yet.`,
+    ``,
+    opts.prose,
+    ``,
+    `———`,
+    ``,
+    `Read it, rewrite it, or send it as it stands:`,
+    reviewUrl(opts),
+    ``,
+    `If you do nothing it publishes on its own at ${closes}, so the story never`,
+    `waits on you.`,
+  ].join("\n");
+}
+
+/**
+ * The HTML part of the same notice.
+ *
+ * The prose here is a beat *nobody has reviewed yet* — model output, quoted
+ * back at the one person with authority over it. It goes through the same
+ * escaping every other untrusted string in this file does.
+ */
+export function reviewNoticeHtml(opts: ReviewNotice): string {
+  const url = reviewUrl(opts);
+  return (
+    `<div style="font:16px/1.6 Georgia,serif;max-width:34em;margin:0 auto;color:#1c1a17">` +
+    `<p style="margin:0 0 1em;color:#6b6459;font-size:.9em">Turn ${opts.tick} of ` +
+    `${escapeHtml(opts.campaignName)} has resolved. Nobody has seen it yet.</p>` +
+    paragraphs(opts.prose) +
+    `<hr style="border:0;border-top:1px solid #ddd8cf;margin:1.6em 0">` +
+    `<p style="margin:0 0 .6em"><a href="${escapeHtml(url)}" style="color:#8a4b2a">` +
+    `Read it, rewrite it, or send it as it stands</a></p>` +
+    `<p style="margin:0;color:#6b6459;font-size:.9em">If you do nothing it publishes on its own at ` +
+    `${escapeHtml(new Date(opts.closesAt).toUTCString())}, so the story never waits on you.</p>` +
+    `</div>`
+  );
+}
+
+/**
+ * Mail the DM that a beat is held.
+ *
+ * Best-effort by construction: the window closes on the alarm whether or not
+ * this arrives, so a mail failure costs a notification, never a turn. It writes
+ * no `reply_bindings` row on purpose — this is not a turn prompt, and a binding
+ * would file the DM's reply as their character's action for the very turn they
+ * are being asked to review. For the same reason it sets no `replyTo`: replies
+ * land on the from address rather than the inbound game inbox.
+ */
+export async function sendReviewNotice(
+  env: Env,
+  opts: {
+    campaignSlug: string;
+    campaignName: string;
+    tick: number;
+    toEmail: string;
+    prose: string;
+    closesAt: number;
+  },
+): Promise<void> {
+  const notice: ReviewNotice = { ...opts, origin: env.PUBLIC_ORIGIN };
+  await sendWithRetry(
+    env,
+    {
+      to: opts.toEmail,
+      from: { email: `dm@${env.MAIL_DOMAIN}`, name: opts.campaignName },
+      subject: reviewNoticeSubject(opts.campaignName, opts.tick),
+      text: reviewNoticeBody(notice),
+      html: reviewNoticeHtml(notice),
+      headers: {
+        "X-Asyncrpg-Campaign": opts.campaignSlug,
+        "X-Asyncrpg-Tick": String(opts.tick),
+      },
+    },
+    `review-notice campaign=${opts.campaignSlug} tick=${opts.tick}`,
+  );
 }
 
 export async function sendMagicLink(env: Env, toEmail: string, token: string): Promise<boolean> {

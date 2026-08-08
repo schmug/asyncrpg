@@ -10,7 +10,7 @@ import { env as runtimeEnv } from "cloudflare:workers";
 import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, resetDatabase } from "../helpers/schema";
-import { setSeat } from "../../src/dm/seat";
+import { getSeat, setSeat } from "../../src/dm/seat";
 import type { EmailSendMessage, Env } from "../../src/env";
 import type { WorldState } from "../../src/sim/types";
 
@@ -33,6 +33,14 @@ const HOST = "plr_host";
  */
 let objectName = CAMPAIGN;
 let objectSeq = 0;
+/**
+ * Unique per test, and carried in every subject this campaign sends.
+ *
+ * Mail goes out through `waitUntil`, so a message from the previous test can
+ * still be in flight when this one starts recording — and the binding is
+ * global, so it lands in *our* array. The name is what tells the two apart.
+ */
+let campaignName = "Windy Hold";
 
 function stub() {
   return env.CAMPAIGN.get(env.CAMPAIGN.idFromName(objectName));
@@ -40,6 +48,7 @@ function stub() {
 
 async function seedCampaign(): Promise<void> {
   objectName = `${CAMPAIGN}-${++objectSeq}`;
+  campaignName = `Windy Hold ${objectSeq}`;
 
   // The real migrations, from bare. Cheaper to reason about than a hand-ordered
   // set of DELETEs, and it cannot drift from what production applies.
@@ -51,11 +60,11 @@ async function seedCampaign(): Promise<void> {
     .bind(HOST, "host@example.com", now).run();
   await env.DB.prepare(
     `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
-     VALUES (?, 'win', 'Windy Hold', 'weekly', ?, ?)`,
-  ).bind(CAMPAIGN, HOST, now).run();
+     VALUES (?, 'win', ?, 'weekly', ?, ?)`,
+  ).bind(CAMPAIGN, campaignName, HOST, now).run();
 
   const campaign = stub();
-  await campaign.init({ campaignId: CAMPAIGN, slug: "win", name: "Windy Hold", cadence: "weekly" });
+  await campaign.init({ campaignId: CAMPAIGN, slug: "win", name: campaignName, cadence: "weekly" });
   const joined = await campaign.join(HOST, "Host");
   await env.DB.prepare(
     `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, joined_at)
@@ -112,14 +121,26 @@ async function settleMail(expected: number): Promise<number[]> {
 let sent: EmailSendMessage[] = [];
 let realEmail: Env["EMAIL"] | null = null;
 
-/** Mail that has actually been handed to the binding. */
+/**
+ * Beat mail that has actually been handed to the binding.
+ *
+ * Opening a window also mails the DM a notice, and that message is not a beat:
+ * it goes out *before* publication and carries no `replyTo`, precisely because
+ * a reply to it must not be filed as the turn's action. Counting it here would
+ * make "exactly one beat went out" read as two, so the filter is the same
+ * structural property the notice is defined by rather than a subject match.
+ */
+function beatMail(): EmailSendMessage[] {
+  return sent.filter((m) => m.replyTo && m.subject.includes(campaignName));
+}
+
 async function settleSent(expected: number): Promise<EmailSendMessage[]> {
   for (let i = 0; i < 60; i++) {
-    if (sent.length >= expected) break;
+    if (beatMail().length >= expected) break;
     await new Promise((r) => setTimeout(r, 50));
   }
   await new Promise((r) => setTimeout(r, 250));
-  return sent;
+  return beatMail();
 }
 
 /** The alarm itself — the real clock, not the D1 mirror players are shown. */
@@ -549,6 +570,356 @@ describe("review window", () => {
     expect(summary.held).toBe(false);
     expect((await beatRow(summary.tick))?.published_at).not.toBeNull();
     expect((await stub().reviewState()).phase).toBe("open");
+  });
+
+  it("still holds the beat when the DM notice cannot be sent", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    // The plan reached this state by pointing the seat at a nonexistent player,
+    // which the real migrations reject outright — `dm_player_id REFERENCES
+    // players(id)`. Breaking the send itself is the same failure and a truer
+    // one: mail is the dependency that must never be able to cost a turn.
+    (env as { EMAIL: Env["EMAIL"] }).EMAIL = {
+      send: async () => {
+        throw new Error("mail is down");
+      },
+    };
+
+    const summary = await stub().resolveTick("manual");
+    expect(summary.held).toBe(true);
+    expect((await stub().reviewState()).phase).toBe("review");
+  });
+
+  describe("a DM who stops showing up", () => {
+    async function missed(): Promise<number> {
+      const row = await env.DB.prepare(
+        "SELECT dm_missed_windows FROM campaigns WHERE id = ?",
+      ).bind(CAMPAIGN).first<{ dm_missed_windows: number }>();
+      return row?.dm_missed_windows ?? 0;
+    }
+
+    async function seatHolder(): Promise<string | null> {
+      const row = await env.DB.prepare(
+        "SELECT dm_player_id FROM campaigns WHERE id = ?",
+      ).bind(CAMPAIGN).first<{ dm_player_id: string | null }>();
+      return row?.dm_player_id ?? null;
+    }
+
+    beforeEach(async () => {
+      // Foreign keys are live in this fixture, so the player row has to exist
+      // before either the seat column or the membership can reference it.
+      const now = new Date().toISOString();
+      await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
+        .bind("plr_dm", "dm@example.com", now).run();
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO memberships
+           (campaign_id, player_id, character_id, character_name, joined_at)
+         VALUES (?, 'plr_dm', 'chr_dm', 'Dee', ?)`,
+      ).bind(CAMPAIGN, now).run();
+      await setSeat(env.DB, CAMPAIGN, "plr_dm");
+    });
+
+    it("counts a window that expired untouched", async () => {
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat({ expired: true });
+      expect(await missed()).toBe(1);
+    });
+
+    it("resets the count when the DM publishes themselves", async () => {
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat({ expired: true });
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat();
+      expect(await missed()).toBe(0);
+    });
+
+    it("reverts the seat to the host after three", async () => {
+      for (let i = 0; i < 3; i++) {
+        await stub().resolveTick("manual");
+        await stub().publishHeldBeat({ expired: true });
+      }
+      expect(await seatHolder()).toBe(HOST);
+      // Reverting is a fresh start for whoever holds it now.
+      expect(await missed()).toBe(0);
+    });
+
+    it("does not revert at two", async () => {
+      for (let i = 0; i < 2; i++) {
+        await stub().resolveTick("manual");
+        await stub().publishHeldBeat({ expired: true });
+      }
+      expect(await seatHolder()).toBe("plr_dm");
+    });
+
+    it("counts a window the next tick had to close on the DM's behalf", async () => {
+      // The self-heal path: the review alarm is lost, so the following
+      // resolution publishes the stranded beat with `expired: true`. That is
+      // the same silence as an expired window and must cost the same.
+      await stub().resolveTick("manual");
+      await stub().resolveTick("manual");
+      expect(await missed()).toBe(1);
+    });
+
+    it("counts three the same whichever path closed each window", async () => {
+      // Key normalisation, in the sense that matters here: "three consecutive
+      // silent windows" is one state. It must not depend on whether the alarm,
+      // the next tick, or a manual expiry got there — otherwise a campaign that
+      // lost an alarm keeps its DM forever.
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat({ expired: true });
+      await stub().resolveTick("manual");
+      await stub().resolveTick("manual"); // self-heal closes window two
+      expect(await runDurableObjectAlarm(stub())).toBe(true); // the alarm closes three
+      await settlePublished();
+
+      expect(await seatHolder()).toBe(HOST);
+      expect(await missed()).toBe(0);
+    });
+
+    it("does not count a window the DM spent rewriting the beat", async () => {
+      // The spec's word is "untouched" (docs/specs §3), not "unpublished". A DM
+      // who rewrote the prose and let the clock send it was present, and taking
+      // their seat away for that would be a bug wearing a policy's clothes.
+      const first = await stub().resolveTick("manual");
+      await env.DB.prepare(
+        "UPDATE beats SET prose = ?, original_prose = prose, revised_by = 'plr_dm' " +
+          "WHERE campaign_id = ? AND tick = ?",
+      ).bind("The ford ran high, and nobody crossed.", CAMPAIGN, first.tick).run();
+
+      await stub().publishHeldBeat({ expired: true });
+      expect(await missed()).toBe(0);
+    });
+
+    it("stops counting once the seat is vacated mid-window", async () => {
+      await stub().resolveTick("manual");
+      await setSeat(env.DB, CAMPAIGN, null);
+      await stub().publishHeldBeat({ expired: true });
+      expect(await missed()).toBe(0);
+      expect(await seatHolder()).toBeNull();
+    });
+
+    it("charges one window once, however many callers close it", async () => {
+      // The review alarm, the DM's button and the next tick's self-heal can all
+      // arrive together. Exactly one of them publishes, so exactly one of them
+      // may count — a window charged twice reverts the seat a third early.
+      await stub().resolveTick("manual");
+      await runInDurableObject(stub(), (instance) =>
+        Promise.all([
+          instance.publishHeldBeat({ expired: true }),
+          instance.publishHeldBeat({ expired: true }),
+          instance.publishHeldBeat({ expired: true }),
+          instance.publishHeldBeat({ expired: true }),
+        ]),
+      );
+      expect(await missed()).toBe(1);
+    });
+
+    it("counts two windows that close at the same moment as two", async () => {
+      // The other direction, and the one a read-then-write counter loses: two
+      // windows in flight at once both read the old number before either
+      // writes, so three silences record as two and the seat never moves.
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat({ expired: true });
+      await stub().resolveTick("manual");
+      await runInDurableObject(stub(), (instance) =>
+        Promise.all([
+          instance.publishHeldBeat({ expired: true }),
+          instance.publishHeldBeat({ expired: true }),
+        ]),
+      );
+      expect(await missed()).toBe(2);
+    });
+
+    it("publishes anyway when the seat bookkeeping cannot be written", async () => {
+      // Accounting is not worth a turn. If the counter cannot be read or
+      // written, the beat still goes out and the alarm still goes back to the
+      // tick clock.
+      const first = await stub().resolveTick("manual");
+      const deadline = await nextDeadlineAt();
+      await env.DB.prepare(
+        "ALTER TABLE campaigns RENAME COLUMN dm_missed_windows TO dm_missed_windows_unreadable",
+      ).run();
+
+      expect(await stub().publishHeldBeat({ expired: true }))
+        .toEqual({ published: true, tick: first.tick });
+      expect((await stub().reviewState()).phase).toBe("open");
+      expect(await alarmAt()).toBe(deadline);
+    });
+  });
+
+  describe("a beat the DM rewrote", () => {
+    /**
+     * Re-run the tick the object has already resolved.
+     *
+     * Rewinding the stored world to its pre-tick clone is the only way to make
+     * `#project` write the *same* `(campaign_id, tick)` twice, which is the
+     * conflict its `ON CONFLICT` clause exists for. Nothing else in the app
+     * reaches that branch today, and "nothing reaches it today" is exactly how
+     * a clause that silently discards a DM's work survives review.
+     */
+    async function reresolve(before: WorldState): Promise<void> {
+      await runInDurableObject(stub(), (_instance, state) => {
+        state.storage.sql.exec("UPDATE meta SET v = ? WHERE k = 'world'", JSON.stringify(before));
+      });
+      await stub().resolveTick("manual");
+    }
+
+    it("keeps the DM's prose when the tick is projected again", async () => {
+      const before = await stub().debugWorld();
+      const first = await stub().resolveTick("manual");
+
+      const rewritten = "The gate stood open, and nobody would say who had opened it.";
+      await env.DB.prepare(
+        "UPDATE beats SET prose = ?, original_prose = prose, revised_by = ? " +
+          "WHERE campaign_id = ? AND tick = ?",
+      ).bind(rewritten, HOST, CAMPAIGN, first.tick).run();
+
+      await reresolve(before);
+      expect((await beatRow(first.tick))?.prose).toBe(rewritten);
+    });
+
+    it("still repairs an unrevised beat", async () => {
+      // The other half: the guard must protect a rewrite, not freeze the row.
+      const before = await stub().debugWorld();
+      const first = await stub().resolveTick("manual");
+      await env.DB.prepare("UPDATE beats SET prose = 'STALE' WHERE campaign_id = ? AND tick = ?")
+        .bind(CAMPAIGN, first.tick).run();
+
+      await reresolve(before);
+      expect((await beatRow(first.tick))?.prose).not.toBe("STALE");
+    });
+
+    it("survives a chronicle rebuild", async () => {
+      const first = await stub().resolveTick("manual");
+      const rewritten = "Nobody spoke on the walk back.";
+      await env.DB.prepare(
+        "UPDATE beats SET prose = ?, original_prose = prose, revised_by = ? " +
+          "WHERE campaign_id = ? AND tick = ?",
+      ).bind(rewritten, HOST, CAMPAIGN, first.tick).run();
+
+      await stub().reproject();
+      expect((await beatRow(first.tick))?.prose).toBe(rewritten);
+    });
+  });
+
+  describe("what a held turn shows in the app", () => {
+    const OTHER = "plr_two";
+
+    beforeEach(async () => {
+      const now = new Date().toISOString();
+      await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
+        .bind(OTHER, "two@example.com", now).run();
+      const joined = await stub().join(OTHER, "Two");
+      await env.DB.prepare(
+        `INSERT OR IGNORE INTO memberships
+           (campaign_id, player_id, character_id, character_name, joined_at)
+         VALUES (?, ?, ?, ?, ?)`,
+      ).bind(CAMPAIGN, OTHER, joined.characterId, joined.characterName, now).run();
+      await setSeat(env.DB, CAMPAIGN, HOST);
+    });
+
+    it("does not leak the outcome to a member while the beat is held", async () => {
+      const beforeSituation = (await stub().snapshot()).situation;
+      await stub().resolveTick("manual");
+      const resolved = (await stub().debugWorld()).scene.situation;
+      // If the tick did not move the scene line there is nothing to leak and
+      // this file would be asserting nothing at all.
+      expect(resolved).not.toBe(beforeSituation);
+
+      // The scene line advances at resolution, but a player who has not read
+      // the beat must still be looking at the world they last saw.
+      expect((await stub().snapshot(OTHER)).situation).toBe(beforeSituation);
+    });
+
+    it("shows the DM the turn they are being asked to judge", async () => {
+      const beforeSituation = (await stub().snapshot()).situation;
+      await stub().resolveTick("manual");
+      const resolved = (await stub().debugWorld()).scene.situation;
+
+      expect((await stub().snapshot(HOST)).situation).toBe(resolved);
+      expect((await stub().snapshot(HOST)).situation).not.toBe(beforeSituation);
+    });
+
+    it("shows everyone the new scene once the beat publishes", async () => {
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat();
+      const resolved = (await stub().debugWorld()).scene.situation;
+
+      expect((await stub().snapshot(OTHER)).situation).toBe(resolved);
+      expect((await stub().snapshot(HOST)).situation).toBe(resolved);
+      expect((await stub().snapshot()).situation).toBe(resolved);
+    });
+
+    it("masks the scene for a caller that names no viewer", async () => {
+      // The campaign GET calls `snapshot()` with no argument. An absent viewer
+      // has to mean "assume the least privilege", never "assume the DM".
+      const beforeSituation = (await stub().snapshot()).situation;
+      await stub().resolveTick("manual");
+      expect((await stub().snapshot()).situation).toBe(beforeSituation);
+    });
+
+    it("masks the scene when the seat cannot be read", async () => {
+      const beforeSituation = (await stub().snapshot()).situation;
+      await stub().resolveTick("manual");
+      await env.DB.prepare(
+        "ALTER TABLE campaigns RENAME COLUMN dm_player_id TO dm_player_id_unreadable",
+      ).run();
+      // A lookup that will not answer cannot be a reason to show the DM's view
+      // to everybody.
+      expect((await stub().snapshot(HOST)).situation).toBe(beforeSituation);
+    });
+
+    it("does not hold a stale scene past the window", async () => {
+      // The mask is keyed on the phase, so a cleared phase must clear it too —
+      // otherwise a campaign shows last turn's scene forever.
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat();
+      const afterFirst = (await stub().snapshot(OTHER)).situation;
+
+      await stub().resolveTick("manual");
+      await stub().publishHeldBeat();
+      expect((await stub().snapshot(OTHER)).situation).not.toBe(afterFirst);
+    });
+  });
+
+  describe("handing the seat on", () => {
+    it("does not give an incoming DM the outgoing DM's window", async () => {
+      const now = new Date().toISOString();
+      await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
+        .bind("plr_dm", "dm@example.com", now).run();
+
+      await setSeat(env.DB, CAMPAIGN, HOST);
+      // "Never hold" is the outgoing DM's preference, and it is the one setting
+      // whose inheritance is invisible: the new DM gets no window, no notice,
+      // and nothing to tell them why.
+      await env.DB.prepare("UPDATE campaigns SET review_window_ms = 0 WHERE id = ?")
+        .bind(CAMPAIGN).run();
+
+      await setSeat(env.DB, CAMPAIGN, "plr_dm");
+      expect((await getSeat(env.DB, CAMPAIGN))?.reviewWindowMs).toBeNull();
+
+      const summary = await stub().resolveTick("manual");
+      expect(summary.held).toBe(true);
+    });
+
+    it("gives a reverted host a clean slate, window included", async () => {
+      const now = new Date().toISOString();
+      await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
+        .bind("plr_dm", "dm@example.com", now).run();
+      await setSeat(env.DB, CAMPAIGN, "plr_dm");
+      // Long enough that the review alarm cannot fire inside this test: the
+      // three windows are closed by the explicit calls below, so what is being
+      // asserted is the reset, not a race with the clock.
+      await env.DB.prepare("UPDATE campaigns SET review_window_ms = 60000 WHERE id = ?")
+        .bind(CAMPAIGN).run();
+
+      for (let i = 0; i < 3; i++) {
+        await stub().resolveTick("manual");
+        await stub().publishHeldBeat({ expired: true });
+      }
+
+      const seat = await getSeat(env.DB, CAMPAIGN);
+      expect(seat).toEqual({ dmPlayerId: HOST, reviewWindowMs: null, missedWindows: 0 });
+    });
   });
 
   it("publishes a blocked beat rather than holding one nobody can release", async () => {

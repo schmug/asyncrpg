@@ -14,7 +14,7 @@ import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
 import { applySchema, resetDatabase } from "../helpers/schema";
 import { mintSessionForTest } from "../helpers/session";
-import { DEFAULT_WINDOW_MS, getSeat, resolveWindowMs, setSeat } from "../../src/dm/seat";
+import { DEFAULT_WINDOW_MS, MAX_WINDOW_MS, getSeat, resolveWindowMs, setSeat } from "../../src/dm/seat";
 import worker from "../../src/index";
 import type { Env } from "../../src/env";
 
@@ -148,9 +148,21 @@ describe("dm seat", () => {
       expect(resolveWindowMs("weekly", -5)).toBe(0);
     });
 
-    it("rejects a window that is not a finite number", () => {
+    it("rejects a window that carries no magnitude at all", () => {
+      // NaN names no length, so there is no window it could mean and the safe
+      // reading is today's behaviour: publish now.
       expect(resolveWindowMs("weekly", Number.NaN)).toBe(0);
-      expect(resolveWindowMs("weekly", Number.POSITIVE_INFINITY)).toBe(0);
+    });
+
+    it("clamps an infinite window instead of collapsing it to zero", () => {
+      // This used to return 0 — "hold forever" resolving to "publish
+      // immediately", which is the most dangerous direction the function has.
+      // +Infinity does name a length, and the cap is the answer to it.
+      expect(resolveWindowMs("weekly", Number.POSITIVE_INFINITY)).toBe(MAX_WINDOW_MS.weekly);
+      expect(resolveWindowMs("daily", Number.POSITIVE_INFINITY)).toBe(MAX_WINDOW_MS.daily);
+      expect(resolveWindowMs("monthly", Number.POSITIVE_INFINITY)).toBe(MAX_WINDOW_MS.monthly);
+      // The other infinity is still a non-positive window, and still means now.
+      expect(resolveWindowMs("weekly", Number.NEGATIVE_INFINITY)).toBe(0);
     });
 
     it("falls back to the weekly default for an unknown cadence", () => {

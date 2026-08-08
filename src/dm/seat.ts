@@ -30,6 +30,9 @@ export const MAX_WINDOW_MS = {
   monthly: 10 * DAY,
 } as const;
 
+/** Consecutive untouched windows before the seat goes back to the host. */
+export const MISSED_WINDOWS_BEFORE_REVERT = 3;
+
 type Cadence = keyof typeof DEFAULT_WINDOW_MS;
 
 const isCadence = (v: string): v is Cadence => v in DEFAULT_WINDOW_MS;
@@ -61,11 +64,21 @@ export async function getSeat(db: D1Database, campaignId: string): Promise<Seat 
 }
 
 /**
- * Assign the seat, or vacate it with `null`. Either way the miss count resets.
+ * Assign the seat, or vacate it with `null`. Either way the seat is reset to a
+ * clean slate: no miss count, and no window inherited from whoever sat here
+ * before.
  *
  * Resetting is what makes the seat a state rather than a history: "plr_two
  * holds the seat" must mean the same thing however it came to be true, or the
  * reversion rule would fire on a DM who inherited someone else's silence.
+ *
+ * The window resets for the same reason and one sharper one. `0` means "never
+ * hold", and it is the only setting whose inheritance is *invisible*: the
+ * incoming DM would get no window, no notice, and no beat to review, with
+ * nothing anywhere to tell them why. A group that wants a shorter window sets
+ * it again in one call; a DM who silently never gets one has no such recourse.
+ * `NULL` is "use the cadence default", so the reset lands on the documented
+ * behaviour rather than on a number chosen here.
  */
 export async function setSeat(
   db: D1Database,
@@ -73,7 +86,10 @@ export async function setSeat(
   playerId: string | null,
 ): Promise<void> {
   await db
-    .prepare("UPDATE campaigns SET dm_player_id = ?, dm_missed_windows = 0 WHERE id = ?")
+    .prepare(
+      "UPDATE campaigns SET dm_player_id = ?, dm_missed_windows = 0, review_window_ms = NULL " +
+        "WHERE id = ?",
+    )
     .bind(playerId, campaignId)
     .run();
 }
@@ -87,10 +103,18 @@ export async function setSeat(
  * `undefined` is accepted alongside `null` because callers reach this through
  * an optional chain (`seat?.reviewWindowMs`), and an absent seat means the same
  * thing an unset column does.
+ *
+ * The infinities are not symmetric, and deliberately so. `+Infinity` names a
+ * length — the longest one there is — so the cap answers it, exactly as it
+ * answers "ten days". Folding it in with the rejects returned `0`, which turned
+ * "hold this forever" into "publish it immediately": the most dangerous
+ * direction this function has, since it releases an unreviewed beat rather than
+ * delaying a reviewed one. `-Infinity` is just a non-positive window, and
+ * `NaN` names no length at all, so both keep meaning "publish now".
  */
 export function resolveWindowMs(cadence: string, configured: number | null | undefined): number {
   const key: Cadence = isCadence(cadence) ? cadence : "weekly";
   if (configured === null || configured === undefined) return DEFAULT_WINDOW_MS[key];
-  if (!Number.isFinite(configured) || configured <= 0) return 0;
+  if (Number.isNaN(configured) || configured <= 0) return 0;
   return Math.min(configured, MAX_WINDOW_MS[key]);
 }
