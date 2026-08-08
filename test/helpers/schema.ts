@@ -15,11 +15,6 @@
  */
 
 import { applyD1Migrations, type D1Migration } from "cloudflare:test";
-import m0001 from "../../migrations/0001_init.sql?raw";
-import m0002 from "../../migrations/0002_invites.sql?raw";
-import m0003 from "../../migrations/0003_ops.sql?raw";
-import m0004 from "../../migrations/0004_email_loopback.sql?raw";
-import m0005 from "../../migrations/0005_dm.sql?raw";
 
 /**
  * Split a migration file into executable statements.
@@ -115,17 +110,31 @@ export function splitStatements(sql: string): string[] {
 /**
  * Every migration, in the order D1 applies them.
  *
- * Adding a migration means adding a line here — there is no directory glob
- * inside the workers runtime. The count assertion in `dm-migration.test.ts`
- * is the reminder.
+ * Discovered rather than listed. `import.meta.glob` is resolved by Vite at
+ * build time — the workers runtime never globs anything — so this is a static
+ * set of imports by the time it runs, and a new `migrations/*.sql` is picked up
+ * with no edit here.
+ *
+ * That matters more than the saved line. A hand-maintained list is a fixture
+ * that silently stops covering the schema the moment someone forgets it: the
+ * missing table only surfaces as `no such table` in whichever unrelated test
+ * happens to touch it next. Reviewing this file proved that gap was real — an
+ * unlisted migration left the suite fully green.
  */
-export const MIGRATIONS: D1Migration[] = [
-  { name: "0001_init.sql", queries: splitStatements(m0001) },
-  { name: "0002_invites.sql", queries: splitStatements(m0002) },
-  { name: "0003_ops.sql", queries: splitStatements(m0003) },
-  { name: "0004_email_loopback.sql", queries: splitStatements(m0004) },
-  { name: "0005_dm.sql", queries: splitStatements(m0005) },
-];
+const SOURCES = import.meta.glob<string>("../../migrations/*.sql", {
+  query: "?raw",
+  import: "default",
+  eager: true,
+});
+
+export const MIGRATIONS: D1Migration[] = Object.keys(SOURCES)
+  // Glob order is not guaranteed; D1 applies migrations in filename order and
+  // 0005 depends on 0001's tables existing.
+  .sort()
+  .map((path) => ({
+    name: path.slice(path.lastIndexOf("/") + 1),
+    queries: splitStatements(SOURCES[path]!),
+  }));
 
 /**
  * Bring `db` up to the current schema — every table this project uses, with
