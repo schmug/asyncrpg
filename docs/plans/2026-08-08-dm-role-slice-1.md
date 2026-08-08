@@ -20,6 +20,7 @@
 - **No `Math.random()` in `src/sim/`.** (Unchanged, restated because it is load-bearing; `crypto.randomUUID()` in the DO and router is fine and already used.)
 - **Conventional commit prefixes:** `feat:`, `fix:`, `test:`, `docs:`, `refactor:`, `chore:`.
 - **Run `npm test && npm run typecheck` before every commit.** Report counts explicitly.
+- **Test fixtures run against the real migrations, and `PRAGMA foreign_keys` is 1.** `test/helpers/schema.ts` applies `migrations/*.sql` themselves, so every `CHECK` and `REFERENCES` clause is enforced in tests exactly as in production. Seed parents before children — `players`, then `campaigns`, then `memberships`/`beats`/`events`/`entities`. Never relax a migration to make a fixture pass; fix the fixture.
 - **Not implemented, deliberately:** spec §9's "DM leaves the campaign → seat reverts to host". There is no leave-a-campaign flow anywhere in the app today, so there is nothing to hook it to. Whoever builds membership removal owns adding it; do not build a leave flow for this.
 
 ---
@@ -29,17 +30,29 @@
 **Files:**
 - Create: `migrations/0005_dm.sql`
 - Create: `test/helpers/schema.ts`
+- Modify: `test/env.d.ts` — declare `*.sql?raw`
 - Test: `test/integration/dm-migration.test.ts`
 
 **Interfaces:**
+
+`test/helpers/schema.ts` does not describe the schema. It reads `migrations/0001_init.sql` … `0005_dm.sql` as strings (Vite's `?raw` suffix), splits each into statements, and applies them in filename order through `applyD1Migrations` from `cloudflare:test`. The fixture therefore *is* production DDL — every table, every `CHECK`, every `REFERENCES` — and the migrations get real automated coverage: delete one and the suite goes red.
+
 - Consumes: nothing.
-- Produces: `applySchema(db: D1Database): Promise<void>` from `test/helpers/schema.ts` — creates every table this project uses, including the slice-1 columns. Every later task's test file imports it.
+- Produces, from `test/helpers/schema.ts`:
+  - `applySchema(db: D1Database): Promise<void>` — brings `db` to the current schema: all 17 tables the five migrations create, with production's constraints. Idempotent (`applyD1Migrations` records what it ran in `d1_migrations`), so it is safe in a `beforeEach` even though the pool shares one D1 instance across the tests in a file. Every later task's test file imports it.
+  - `applySchemaThrough(db: D1Database, name: string): Promise<void>` — apply up to and including `name`, and stop. This is what makes a backfill testable: seed rows against the old shape, then call `applySchema` to run the remainder over them for real.
+  - `resetDatabase(db: D1Database): Promise<void>` — drop every table including `d1_migrations`, so the next `applySchema` runs the chain from bare.
+  - `splitStatements(sql: string): string[]` and `MIGRATIONS: D1Migration[]` — exported so the schema test can assert the split is correct.
+
+**A naive `sql.split(";")` is wrong for these files.** `0001_init.sql` lines 83 and 113 and `0003_ops.sql` line 5 each carry a semicolon inside a `--` comment; splitting on the raw character shears those into fragments that no longer parse. `splitStatements` walks the text, skipping comments and quoted spans, and breaks only at top level. The schema test pins the per-file statement counts (22 / 3 / 6 / 2 / 8) and asserts every statement begins with a DDL/DML verb, so a mis-parse fails loudly instead of corrupting a fixture.
+
+**Foreign keys are enforced.** `PRAGMA foreign_keys` is 1 in the workers pool, and the real DDL declares the constraints, so a fixture must seed `players` before `campaigns` before `beats`. A row that production would reject is now rejected in tests too — which is the point.
 
 Note on the existing `test/integration/email-handler.test.ts`: it declares its own inline `SCHEMA` constant. **Leave it alone.** Migrating it is unrelated churn; the helper is for new tests.
 
 - [ ] **Step 1: Write the failing test**
 
-Create `test/integration/dm-migration.test.ts`:
+Create `test/integration/dm-migration.test.ts`. It has three parts: the fixture's own guard rails (the split is whole, every table exists, constraints are real), the two column-shape assertions, and — the one that matters — the backfill, exercised the only way it can be: apply 0001–0004, write a beat against that older shape, then run 0005 over it.
 
 ```ts
 /**
@@ -48,21 +61,123 @@ Create `test/integration/dm-migration.test.ts`:
  * Adding `beats.published_at` with a NULL default retroactively marks every
  * historical beat as "held in review", which would empty the chronicle of every
  * campaign in production. The backfill is the point of this test.
+ *
+ * These run against `migrations/*.sql` themselves, not a restatement of them
+ * (see `test/helpers/schema.ts`). Deleting `0005_dm.sql`, or deleting its
+ * `UPDATE beats` line, turns this file red.
  */
 
 import { env as runtimeEnv } from "cloudflare:workers";
 import { beforeEach, describe, expect, it } from "vitest";
-import { applySchema } from "../helpers/schema";
+import {
+  MIGRATIONS,
+  applySchema,
+  applySchemaThrough,
+  resetDatabase,
+  splitStatements,
+} from "../helpers/schema";
 import type { Env } from "../../src/env";
 
 const env = runtimeEnv as unknown as Env;
 
+/** Every table the five migrations create. `applySchema` must produce all of them. */
+const PRODUCTION_TABLES = [
+  "auth_tokens",
+  "beats",
+  "campaigns",
+  "downtime",
+  "email_loopback",
+  "entities",
+  "events",
+  "invites",
+  "journals",
+  "letters",
+  "memberships",
+  "players",
+  "projection_failures",
+  "rate_limits",
+  "reply_bindings",
+  "settings",
+  "token_budget",
+];
+
+/**
+ * Statements per migration file.
+ *
+ * This is the guard on the splitter. Three of these files carry a semicolon
+ * inside a `--` comment, so `split(";")` would report 24/3/7/2/8 and hand D1
+ * sheared fragments; the numbers below are the real statement counts. If a
+ * migration is edited, update the number deliberately — a surprise here means
+ * the splitter mis-parsed something.
+ */
+const STATEMENT_COUNTS: Record<string, number> = {
+  "0001_init.sql": 22,
+  "0002_invites.sql": 3,
+  "0003_ops.sql": 6,
+  "0004_email_loopback.sql": 2,
+  "0005_dm.sql": 8,
+};
+
+async function tableNames(): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+  ).all<{ name: string }>();
+  return results.map((r) => r.name);
+}
+
+describe("the migration fixture", () => {
+  it("splits every migration into whole statements", () => {
+    for (const migration of MIGRATIONS) {
+      expect(migration.queries.length, migration.name).toBe(
+        STATEMENT_COUNTS[migration.name],
+      );
+      for (const query of migration.queries) {
+        // A comment-semicolon shear leaves a fragment starting mid-sentence.
+        // Every real statement here starts with one of these verbs.
+        expect(query, `${migration.name}: ${query.slice(0, 60)}`).toMatch(
+          /^(CREATE|ALTER|UPDATE|INSERT|DROP)\b/i,
+        );
+      }
+    }
+  });
+
+  it("keeps a semicolon that lives inside a comment out of the statement stream", () => {
+    const sql = [
+      "-- a semicolon; inside a comment",
+      "CREATE TABLE a (x TEXT DEFAULT 'has ; inside');",
+      "CREATE TABLE b (y TEXT);",
+    ].join("\n");
+    expect(splitStatements(sql)).toEqual([
+      "CREATE TABLE a (x TEXT DEFAULT 'has ; inside')",
+      "CREATE TABLE b (y TEXT)",
+    ]);
+  });
+
+  it("creates every table this project uses", async () => {
+    await resetDatabase(env.DB);
+    await applySchema(env.DB);
+    expect(await tableNames()).toEqual(
+      expect.arrayContaining(PRODUCTION_TABLES),
+    );
+  });
+
+  it("carries production's constraints, not a relaxed copy of them", async () => {
+    await resetDatabase(env.DB);
+    await applySchema(env.DB);
+    // REFERENCES survives: a campaign with no such creator is rejected.
+    await expect(
+      env.DB.prepare(
+        `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
+         VALUES ('cmp_orphan', 'orphan', 'Orphan', 'weekly', 'plr_nobody', '2026-01-01T00:00:00Z')`,
+      ).run(),
+    ).rejects.toThrow(/FOREIGN KEY/i);
+  });
+});
+
 describe("slice-1 schema", () => {
   beforeEach(async () => {
+    await resetDatabase(env.DB);
     await applySchema(env.DB);
-    for (const t of ["beats", "campaigns", "players"]) {
-      await env.DB.prepare(`DELETE FROM ${t}`).run();
-    }
   });
 
   it("gives campaigns a DM seat and a window, both empty by default", async () => {
@@ -85,6 +200,15 @@ describe("slice-1 schema", () => {
 
   it("gives beats the publication and revision columns", async () => {
     const now = new Date().toISOString();
+    // `beats.campaign_id` REFERENCES campaigns, which REFERENCES players, so
+    // the row this test is actually about needs both seeded first.
+    await env.DB.prepare(
+      "INSERT INTO players (id, email, created_at) VALUES ('plr_b', 'b@example.com', ?)",
+    ).bind(now).run();
+    await env.DB.prepare(
+      `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
+       VALUES ('cmp_b', 'b', 'B', 'weekly', 'plr_b', ?)`,
+    ).bind(now).run();
     await env.DB.prepare(
       `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at)
        VALUES ('cmp_b', 1, 'The gate holds.', 'At the gate.', 'model', ?)`,
@@ -97,6 +221,77 @@ describe("slice-1 schema", () => {
     expect(row).not.toBeNull();
     expect(row?.revised_by).toBeNull();
     expect(row?.original_prose).toBeNull();
+  });
+});
+
+describe("the 0005 backfill", () => {
+  /**
+   * The hazard, reproduced: a beat that existed before `published_at` did.
+   *
+   * Applying 0001–0004 only, writing a beat against that older shape, and then
+   * running 0005 over it is the one arrangement in which the `UPDATE beats SET
+   * published_at = created_at` line does any work. Delete that line and this
+   * test fails.
+   */
+  async function seedLegacyBeatThenMigrate(): Promise<void> {
+    await resetDatabase(env.DB);
+    await applySchemaThrough(env.DB, "0004_email_loopback.sql");
+
+    await env.DB.prepare(
+      "INSERT INTO players (id, email, created_at) VALUES ('plr_old', 'old@example.com', '2025-12-01T00:00:00Z')",
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
+       VALUES ('cmp_old', 'old', 'Old Hold', 'weekly', 'plr_old', '2025-12-01T00:00:00Z')`,
+    ).run();
+    await env.DB.prepare(
+      `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at)
+       VALUES ('cmp_old', 1, 'The gate held, once.', 'At the gate.', 'model', '2026-01-01T00:00:00Z')`,
+    ).run();
+
+    await applySchema(env.DB);
+  }
+
+  it("has no published_at column before 0005 runs", async () => {
+    await resetDatabase(env.DB);
+    await applySchemaThrough(env.DB, "0004_email_loopback.sql");
+    const { results } = await env.DB.prepare("PRAGMA table_info(beats)").all<{ name: string }>();
+    expect(results.map((r) => r.name)).not.toContain("published_at");
+  });
+
+  it("leaves no pre-existing beat held in review", async () => {
+    await seedLegacyBeatThenMigrate();
+
+    const held = await env.DB.prepare(
+      "SELECT count(*) AS n FROM beats WHERE published_at IS NULL",
+    ).first<{ n: number }>();
+    expect(held?.n).toBe(0);
+  });
+
+  it("backfills published_at from created_at, so the chronicle keeps its history", async () => {
+    await seedLegacyBeatThenMigrate();
+
+    const row = await env.DB.prepare(
+      "SELECT published_at FROM beats WHERE campaign_id = 'cmp_old' AND tick = 1",
+    ).first<{ published_at: string | null }>();
+
+    expect(row?.published_at).toBe("2026-01-01T00:00:00Z");
+  });
+
+  it("still defaults a beat written after the migration to held", async () => {
+    // The backfill must be a one-time repair, not a default that would make
+    // `published_at` meaningless for beats the DM is supposed to hold.
+    await seedLegacyBeatThenMigrate();
+    await env.DB.prepare(
+      `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at)
+       VALUES ('cmp_old', 2, 'The gate holds.', 'At the gate.', 'model', '2026-02-01T00:00:00Z')`,
+    ).run();
+
+    const row = await env.DB.prepare(
+      "SELECT published_at FROM beats WHERE campaign_id = 'cmp_old' AND tick = 2",
+    ).first<{ published_at: string | null }>();
+
+    expect(row?.published_at).toBeNull();
   });
 });
 ```
@@ -153,71 +348,210 @@ CREATE INDEX IF NOT EXISTS idx_beats_published
 
 - [ ] **Step 4: Write the test schema helper**
 
-Create `test/helpers/schema.ts`:
+Create `test/helpers/schema.ts`. Do not restate the DDL here — read the migration files:
 
 ```ts
 /**
- * Schema for tests that need real D1 tables.
+ * Test fixtures get the production schema, not a restatement of it.
  *
- * The workers test pool gives us a real D1 instance but does not run
- * `migrations/`, so the DDL is restated here. Keep it in sync when a migration
- * adds a column a test reads. Only the tables tests actually touch are
- * included — this is not a mirror of production.
+ * The workers pool hands us a real D1 instance but does not run `migrations/`,
+ * so this helper reads the migration files themselves — via Vite's `?raw` — and
+ * applies them in filename order. Nothing here describes the schema. That is
+ * the point: a fixture that restates the DDL drifts from production silently,
+ * accepts rows production rejects (it had no `CHECK` or `REFERENCES` clauses),
+ * and leaves the migrations with zero automated coverage. Reading the files
+ * means every constraint and every table is exactly what ships, and deleting or
+ * breaking a migration turns the suite red.
+ *
+ * `PRAGMA foreign_keys` is 1 in this pool, so foreign keys really are enforced
+ * here. Fixtures must seed parents before children.
  */
 
-const STATEMENTS = [
-  `CREATE TABLE IF NOT EXISTS players (
-     id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
-     display_name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS campaigns (
-     id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
-     cadence TEXT NOT NULL, quorum_fraction REAL NOT NULL DEFAULT 0.5,
-     tick INTEGER NOT NULL DEFAULT 0, deadline_at INTEGER,
-     public_chronicle INTEGER NOT NULL DEFAULT 1,
-     created_by TEXT NOT NULL, created_at TEXT NOT NULL,
-     dm_player_id TEXT, review_window_ms INTEGER,
-     dm_missed_windows INTEGER NOT NULL DEFAULT 0)`,
-  `CREATE TABLE IF NOT EXISTS memberships (
-     campaign_id TEXT NOT NULL, player_id TEXT NOT NULL, character_id TEXT NOT NULL,
-     character_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'player',
-     joined_at TEXT NOT NULL, PRIMARY KEY (campaign_id, player_id))`,
-  `CREATE TABLE IF NOT EXISTS beats (
-     campaign_id TEXT NOT NULL, tick INTEGER NOT NULL, prose TEXT NOT NULL,
-     situation TEXT NOT NULL DEFAULT '', source TEXT NOT NULL, created_at TEXT NOT NULL,
-     published_at TEXT, revised_by TEXT, original_prose TEXT,
-     PRIMARY KEY (campaign_id, tick))`,
-  `CREATE TABLE IF NOT EXISTS events (
-     campaign_id TEXT NOT NULL, event_id TEXT NOT NULL, tick INTEGER NOT NULL,
-     kind TEXT NOT NULL, actor_id TEXT, region_id TEXT, summary TEXT NOT NULL,
-     significance INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '{}',
-     created_at TEXT NOT NULL, PRIMARY KEY (campaign_id, event_id))`,
-  `CREATE TABLE IF NOT EXISTS entities (
-     campaign_id TEXT NOT NULL, entity_id TEXT NOT NULL, kind TEXT NOT NULL,
-     name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
-     PRIMARY KEY (campaign_id, entity_id))`,
-  `CREATE TABLE IF NOT EXISTS settings (
-     key TEXT PRIMARY KEY, value TEXT NOT NULL, updated_at TEXT NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS token_budget (
-     campaign_id TEXT NOT NULL, month TEXT NOT NULL,
-     input_tokens INTEGER NOT NULL DEFAULT 0, output_tokens INTEGER NOT NULL DEFAULT 0,
-     PRIMARY KEY (campaign_id, month))`,
-  `CREATE TABLE IF NOT EXISTS projection_failures (
-     id TEXT PRIMARY KEY, campaign_id TEXT NOT NULL, tick INTEGER NOT NULL,
-     kind TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
-     created_at TEXT NOT NULL, resolved_at TEXT)`,
-  `CREATE TABLE IF NOT EXISTS rate_limits (
-     bucket TEXT PRIMARY KEY, count INTEGER NOT NULL DEFAULT 0, expires_at INTEGER NOT NULL)`,
-  `CREATE TABLE IF NOT EXISTS auth_tokens (
-     token_hash TEXT PRIMARY KEY, player_id TEXT NOT NULL, purpose TEXT NOT NULL,
-     expires_at INTEGER NOT NULL, used_at INTEGER)`,
-  `CREATE TABLE IF NOT EXISTS reply_bindings (
-     code TEXT PRIMARY KEY, message_id TEXT NOT NULL, campaign_id TEXT NOT NULL,
-     player_id TEXT NOT NULL, tick INTEGER NOT NULL, expires_at INTEGER NOT NULL,
-     created_at TEXT NOT NULL)`,
+import { applyD1Migrations, type D1Migration } from "cloudflare:test";
+import m0001 from "../../migrations/0001_init.sql?raw";
+import m0002 from "../../migrations/0002_invites.sql?raw";
+import m0003 from "../../migrations/0003_ops.sql?raw";
+import m0004 from "../../migrations/0004_email_loopback.sql?raw";
+import m0005 from "../../migrations/0005_dm.sql?raw";
+
+/**
+ * Split a migration file into executable statements.
+ *
+ * `sql.split(";")` is *not* safe for these files. Three of them carry a
+ * semicolon inside a `--` comment (`0001_init.sql` lines 83 and 113,
+ * `0003_ops.sql` line 5), and a naive split shears each of those into two
+ * fragments — half a comment and a chunk of DDL that no longer parses. So this
+ * walks the text instead, skipping comments and quoted spans, and breaks only
+ * on a semicolon at top level.
+ *
+ * Spans handled: `--` line comments, C-style block comments, `'…'` and `"…"`
+ * and `` `…` `` with doubled-quote escapes, and `[…]` identifier quoting.
+ *
+ * Not handled: a compound statement body (`CREATE TRIGGER … BEGIN … END;`),
+ * which would need SQLite's keyword-aware rule. No migration has one, and
+ * `dm-migration.test.ts` asserts the per-file statement counts and that every
+ * statement begins with a DDL/DML keyword — so adding a trigger fails loudly
+ * there rather than corrupting a fixture quietly.
+ */
+export function splitStatements(sql: string): string[] {
+  const statements: string[] = [];
+  let current = "";
+  let i = 0;
+
+  while (i < sql.length) {
+    const ch = sql[i]!;
+    const next = sql[i + 1];
+
+    if (ch === "-" && next === "-") {
+      // Drop the comment, keep the newline so tokens stay separated.
+      while (i < sql.length && sql[i] !== "\n") i++;
+      continue;
+    }
+
+    if (ch === "/" && next === "*") {
+      i += 2;
+      while (i < sql.length && !(sql[i] === "*" && sql[i + 1] === "/")) i++;
+      i += 2;
+      current += " ";
+      continue;
+    }
+
+    if (ch === "'" || ch === '"' || ch === "`") {
+      const quote = ch;
+      current += ch;
+      i++;
+      while (i < sql.length) {
+        if (sql[i] === quote) {
+          if (sql[i + 1] === quote) {
+            // A doubled quote is a literal quote, not the end of the span.
+            current += quote + quote;
+            i += 2;
+            continue;
+          }
+          current += quote;
+          i++;
+          break;
+        }
+        current += sql[i]!;
+        i++;
+      }
+      continue;
+    }
+
+    if (ch === "[") {
+      while (i < sql.length && sql[i] !== "]") {
+        current += sql[i]!;
+        i++;
+      }
+      current += "]";
+      i++;
+      continue;
+    }
+
+    if (ch === ";") {
+      const done = current.trim();
+      if (done) statements.push(done);
+      current = "";
+      i++;
+      continue;
+    }
+
+    current += ch;
+    i++;
+  }
+
+  const tail = current.trim();
+  if (tail) statements.push(tail);
+  return statements;
+}
+
+/**
+ * Every migration, in the order D1 applies them.
+ *
+ * Adding a migration means adding a line here — there is no directory glob
+ * inside the workers runtime. The count assertion in `dm-migration.test.ts`
+ * is the reminder.
+ */
+export const MIGRATIONS: D1Migration[] = [
+  { name: "0001_init.sql", queries: splitStatements(m0001) },
+  { name: "0002_invites.sql", queries: splitStatements(m0002) },
+  { name: "0003_ops.sql", queries: splitStatements(m0003) },
+  { name: "0004_email_loopback.sql", queries: splitStatements(m0004) },
+  { name: "0005_dm.sql", queries: splitStatements(m0005) },
 ];
 
+/**
+ * Bring `db` up to the current schema — every table this project uses, with
+ * production's constraints.
+ *
+ * Idempotent: `applyD1Migrations` records what it has run in `d1_migrations`
+ * and skips those, so calling this from `beforeEach` across a whole file is
+ * safe even though the pool shares one D1 instance between tests in a file.
+ */
 export async function applySchema(db: D1Database): Promise<void> {
-  for (const stmt of STATEMENTS) await db.prepare(stmt).run();
+  await applyD1Migrations(db, MIGRATIONS);
+}
+
+/**
+ * Bring `db` up to `name` and stop — the state the database was in *before* the
+ * next migration ran.
+ *
+ * This is what makes a backfill testable: seed rows against the old shape, then
+ * call `applySchema` to run the remaining migration over them for real.
+ */
+export async function applySchemaThrough(db: D1Database, name: string): Promise<void> {
+  const index = MIGRATIONS.findIndex((m) => m.name === name);
+  if (index < 0) throw new Error(`no such migration: ${name}`);
+  await applyD1Migrations(db, MIGRATIONS.slice(0, index + 1));
+}
+
+/**
+ * Drop everything, including the `d1_migrations` bookkeeping, so the next
+ * `applySchema` runs the whole chain from bare.
+ *
+ * Foreign keys are on, so `DROP TABLE` on a parent that still has children
+ * fails. Rather than hard-code a dependency order that a future migration would
+ * invalidate, drop what can be dropped and repeat until a pass makes no
+ * progress.
+ */
+export async function resetDatabase(db: D1Database): Promise<void> {
+  // `_cf_%` is D1's own bookkeeping (`_cf_METADATA`); the runtime refuses to
+  // drop it, and it is not part of anyone's schema.
+  const { results } = await db
+    .prepare(
+      "SELECT name FROM sqlite_master WHERE type = 'table' " +
+        "AND name NOT LIKE 'sqlite_%' AND name NOT LIKE '\\_cf\\_%' ESCAPE '\\'",
+    )
+    .all<{ name: string }>();
+
+  let pending = results.map((r) => r.name);
+  while (pending.length > 0) {
+    const blocked: string[] = [];
+    let lastError: unknown;
+    for (const name of pending) {
+      try {
+        await db.prepare(`DROP TABLE IF EXISTS "${name.replace(/"/g, '""')}"`).run();
+      } catch (err) {
+        lastError = err;
+        blocked.push(name);
+      }
+    }
+    if (blocked.length === pending.length) {
+      throw new Error(`could not drop ${blocked.join(", ")}: ${String(lastError)}`);
+    }
+    pending = blocked;
+  }
+}
+```
+
+And declare the `?raw` module in `test/env.d.ts`, alongside the existing `cloudflare:workers` augmentation:
+
+```ts
+// Vite's `?raw` suffix, used by `test/helpers/schema.ts` to read the real
+// migration files rather than restate them.
+declare module "*.sql?raw" {
+  const sql: string;
+  export default sql;
 }
 ```
 
@@ -227,26 +561,44 @@ export async function applySchema(db: D1Database): Promise<void> {
 npm test -- test/integration/dm-migration.test.ts
 ```
 
-Expected: PASS, 2 tests.
+Expected: PASS, 10 tests.
 
-- [ ] **Step 6: Verify the backfill against a real migration run**
+- [ ] **Step 6: Prove the backfill test actually tests the backfill**
 
-The helper creates tables fresh, so it cannot exercise the `UPDATE beats` backfill. Verify it against a local D1 that already has rows:
-
-```bash
-npx wrangler d1 execute asyncrpg --local --command "INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at) VALUES ('cmp_pre', 1, 'old beat', 's', 'model', '2026-01-01T00:00:00Z')"
-```
+A migration test that stays green when the migration is gone is worth nothing — which is exactly what a hand-restated fixture produces. Mutate the migration and watch the suite fail. Both mutations must go red; restore after each.
 
 ```bash
-npx wrangler d1 migrations apply asyncrpg --local && npx wrangler d1 execute asyncrpg --local --command "SELECT tick, published_at FROM beats WHERE campaign_id = 'cmp_pre'"
+cp migrations/0005_dm.sql /tmp/0005_dm.sql.bak
 ```
 
-Expected: `published_at` equals `2026-01-01T00:00:00Z`, not NULL. If it is NULL the backfill did not run and the chronicle would empty in production — stop and fix before continuing.
+Delete the backfill line — `UPDATE beats SET published_at = created_at WHERE published_at IS NULL;` — from `migrations/0005_dm.sql`, then:
+
+```bash
+npm test -- test/integration/dm-migration.test.ts
+```
+
+Expected: FAIL. "leaves no pre-existing beat held in review" reports 1 instead of 0, and "backfills published_at from created_at" reports `null` instead of `2026-01-01T00:00:00Z`. That `null` is the production hazard, reproduced: every beat written before the migration would be held, and every existing campaign's chronicle would go blank.
+
+Restore it, delete the whole file, and run again:
+
+```bash
+cp /tmp/0005_dm.sql.bak migrations/0005_dm.sql && rm migrations/0005_dm.sql && npm test
+```
+
+Expected: FAIL — `ENOENT: no such file or directory, open '../../migrations/0005_dm.sql'`, because the fixture imports the file rather than describing it.
+
+```bash
+cp /tmp/0005_dm.sql.bak migrations/0005_dm.sql && npm test && npm run typecheck
+```
+
+Expected: green again, and `git status migrations/` clean.
+
+(The earlier version of this step drove `wrangler d1 execute --local` by hand. It could not work: it inserted into `beats` before any schema existed, and the row violated `beats.campaign_id REFERENCES campaigns(id)` and `campaigns.created_by REFERENCES players(id)`. The automated test above replaces it and runs on every commit.)
 
 - [ ] **Step 7: Commit**
 
 ```bash
-git add migrations/0005_dm.sql test/helpers/schema.ts test/integration/dm-migration.test.ts && git commit -m "feat: schema for the DM seat and the review window"
+git add migrations/0005_dm.sql test/helpers/schema.ts test/env.d.ts test/integration/dm-migration.test.ts && git commit -m "feat: schema for the DM seat and the review window"
 ```
 
 ---
