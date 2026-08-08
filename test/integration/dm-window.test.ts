@@ -850,8 +850,11 @@ describe("review window", () => {
     });
 
     it("masks the scene for a caller that names no viewer", async () => {
-      // The campaign GET calls `snapshot()` with no argument. An absent viewer
-      // has to mean "assume the least privilege", never "assume the DM".
+      // `snapshot()`'s viewer is optional, so "nobody named" is a state the
+      // contract has to answer for in its own right: it means "assume the
+      // least privilege", never "assume the DM". Which callers omit the
+      // argument is deliberately not pinned here — that set changes, and the
+      // default has to stay safe for whatever is in it.
       const beforeSituation = (await stub().snapshot()).situation;
       await stub().resolveTick("manual");
       expect((await stub().snapshot()).situation).toBe(beforeSituation);

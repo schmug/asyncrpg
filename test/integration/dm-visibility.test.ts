@@ -248,6 +248,31 @@ describe("held beat visibility", () => {
       expect(body.latestBeat?.held).toBe(true);
     });
 
+    it("keeps the resolved scene line from a member while the beat is held", async () => {
+      // `latestBeat` is not the only way the turn can escape. The scene line
+      // advances at *resolution*, so while the beat waits the object is already
+      // holding the outcome the beat is about to narrate — a one-line spoiler
+      // sitting in the same response, reached by a different field.
+      //
+      // The beats seeded above are D1 fixtures; the scene line lives in the
+      // object, so the hold has to be a real resolved one for the mask to be
+      // under test at all.
+      const stub = env.CAMPAIGN.get(env.CAMPAIGN.idFromName(campaignId));
+      const before = (await stub.snapshot()).situation;
+      await stub.resolveTick("manual");
+      const resolved = (await stub.debugWorld()).scene.situation;
+
+      // If the tick did not move the scene line there is nothing to leak and
+      // the assertions below would pass without meaning anything.
+      expect(resolved).not.toBe(before);
+
+      const body = await (await get(`/api/campaigns/${SLUG}`, PLAYER)).json<{
+        campaign: { situation: string };
+      }>();
+      expect(body.campaign.situation).toBe(before);
+      expect(body.campaign.situation).not.toBe(resolved);
+    });
+
     it("tells a logged-out caller to sign in rather than answering", async () => {
       const res = await get(`/api/campaigns/${SLUG}`);
       expect(res.status).toBe(401);
