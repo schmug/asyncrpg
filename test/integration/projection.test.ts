@@ -21,23 +21,46 @@ import type { Env } from "../../src/env";
 
 const env = runtimeEnv as unknown as Env;
 
+// Both `describe` blocks below need `events`. The second also drives the real
+// `CampaignDO`, which along that path writes `entities` (#writeEntities),
+// `beats` (#project), and reads `memberships`/`players` (#fanOut) — all
+// deliberately swallowed on failure (see #recordProjectionFailure and the
+// fan-out catch in src/campaign-do.ts), so a missing table there does not
+// fail a test, it just prints "projection failed" / "fan-out failed" noise
+// and quietly stops covering that write. That noise is exactly the kind of
+// expected-looking failure a real regression could hide inside — this
+// node's whole subject is a projection bug that stayed invisible for
+// months — so every table the DO touches on this path is declared here too,
+// column-for-column with migrations/0001_init.sql (FK/CHECK constraints
+// dropped, as the rest of this repo's test schemas already do).
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS events (campaign_id TEXT NOT NULL, event_id TEXT NOT NULL,
   tick INTEGER NOT NULL, kind TEXT NOT NULL, actor_id TEXT, region_id TEXT,
   summary TEXT NOT NULL, significance INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '{}',
   target_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
   PRIMARY KEY (campaign_id, event_id));
+CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memberships (campaign_id TEXT NOT NULL, player_id TEXT NOT NULL,
+  character_id TEXT NOT NULL, character_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'player',
+  joined_at TEXT NOT NULL, PRIMARY KEY (campaign_id, player_id));
+CREATE TABLE IF NOT EXISTS entities (campaign_id TEXT NOT NULL, entity_id TEXT NOT NULL,
+  kind TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (campaign_id, entity_id));
+CREATE TABLE IF NOT EXISTS beats (campaign_id TEXT NOT NULL, tick INTEGER NOT NULL,
+  prose TEXT NOT NULL, situation TEXT NOT NULL DEFAULT '', source TEXT NOT NULL,
+  created_at TEXT NOT NULL, PRIMARY KEY (campaign_id, tick));
 `;
 
 const CAMPAIGN = "cmp_projection";
 
-describe("event projection — raw SQL, schema and upsert semantics", () => {
-  beforeAll(async () => {
-    for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) {
-      await env.DB.prepare(stmt).run();
-    }
-  });
+beforeAll(async () => {
+  for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) {
+    await env.DB.prepare(stmt).run();
+  }
+});
 
+describe("event projection — raw SQL, schema and upsert semantics", () => {
   beforeEach(async () => {
     await env.DB.prepare("DELETE FROM events WHERE campaign_id = ?").bind(CAMPAIGN).run();
   });
