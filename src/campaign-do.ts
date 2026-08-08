@@ -621,8 +621,8 @@ export class CampaignDO extends DurableObject<Env> {
     if (events.length === 0) return;
     const now = new Date().toISOString();
     const stmt = this.env.DB.prepare(
-      `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id, summary, significance, data, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id, summary, significance, target_ids, data, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
        ON CONFLICT(campaign_id, event_id) DO NOTHING`,
     );
     try {
@@ -639,6 +639,9 @@ export class CampaignDO extends DurableObject<Env> {
               e.regionId,
               e.summary,
               e.significance,
+              // Top-level on WorldEvent, not part of `data` — easy to miss, and
+              // missing it is exactly what issue #7 was.
+              JSON.stringify(e.targetIds ?? []),
               JSON.stringify(e.data),
               now,
             ),
