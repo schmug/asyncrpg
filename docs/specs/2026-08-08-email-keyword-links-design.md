@@ -156,17 +156,40 @@ currently answer "what did House Vresk do" but not "what happened to House
 Vresk", and the second is most of what a dossier is for.
 
 **Fix:** `migrations/0005_event_targets.sql` adds
-`target_ids TEXT NOT NULL DEFAULT '[]'` plus an index; `#writeEvents` binds
+`target_ids TEXT NOT NULL DEFAULT '[]'` (no index — a `json_each` residual
+predicate cannot use one on a JSON blob column, and `idx_events_tick` already
+serves the campaign+tick narrowing); `#writeEvents` binds
 `JSON.stringify(e.targetIds)`.
 
-**Backfill:** no new machinery. `reproject()` (`src/campaign-do.ts:802`) already
-replays the DO's retained `history` — which holds full `WorldEvent` objects,
-`targetIds` included — through the same `#writeEvents`, and is already exposed
-at `POST /api/campaigns/:slug/reproject`. Existing campaigns are repaired by the
-path built for exactly this class of drift.
+**Backfill — corrected 2026-08-08 after adversarial review.** This section
+originally claimed backfill needed "no new machinery", because `reproject()`
+(`src/campaign-do.ts:802`) replays the DO's retained `history` through
+`#writeEvents`. **That was false, and it was asserted without anyone running
+it.** `#writeEvents` ended in `ON CONFLICT(campaign_id, event_id) DO NOTHING`,
+and every row needing backfill is by definition already in D1 — that is *why*
+its `target_ids` is `'[]'`. The conflict fired and the row was left untouched;
+verified against local D1, the dossier query returned zero rows after a replay
+carrying real ids.
 
-Events older than the DO's retained history keep an empty `target_ids`. Their
-summaries still name the entity, so the dossier is thinner, not wrong.
+The backfill therefore **does** require a change: the conflict clause becomes
+`DO UPDATE SET target_ids = excluded.target_ids`. Only `target_ids` is
+updated — events are otherwise immutable, and widening the upsert is out of
+scope. `#writeEntities` (`src/campaign-do.ts:668`) already uses `DO UPDATE SET`
+for precisely this reason; `#writeEvents` was written `DO NOTHING` when events
+were append-only, and adding a backfillable column broke that premise.
+
+With that change, `POST /api/campaigns/:slug/reproject` does repair existing
+campaigns. Events older than the DO's retained history keep an empty
+`target_ids`; their summaries still name the entity, so the dossier is thinner,
+not wrong.
+
+**Deploy ordering (documented, not automated).** `wrangler deploy` does not
+apply D1 migrations and CI does not either. Because `#writeEvents` swallows
+failures into `#recordProjectionFailure`, a deploy that lands before this
+migration silently stops projecting *every* event of *every* tick while
+dashboards stay green. The migration file and `docs/HANDOFF.md` carry the
+warning; enforcing it is tracked as a follow-up issue rather than automated,
+so that no deploy path gains the power to alter production schema.
 
 ## 8. The dossier page
 
