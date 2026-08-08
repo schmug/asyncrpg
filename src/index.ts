@@ -26,6 +26,7 @@ import {
 import type { Session } from "./auth";
 import { sendMagicLink } from "./email/outbound";
 import { handleInboundEmail } from "./email/inbound";
+import { getSeat, setSeat } from "./dm/seat";
 import { renderChronicle } from "./web/chronicle";
 import type { Env } from "./env";
 
@@ -244,10 +245,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (await campaignBySlug(env, slug)) return fail(409, "that slug is taken");
 
     const id = `cmp_${crypto.randomUUID().replace(/-/g, "").slice(0, 16)}`;
+    // The creator holds the DM seat by default. Without this the column stays
+    // NULL, no campaign ever holds a beat, and the review window is dead code.
     await env.DB.prepare(
-      `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?)`,
+      `INSERT INTO campaigns (id, slug, name, cadence, created_by, dm_player_id, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?)`,
     )
-      .bind(id, slug, name, cadence, session.playerId, new Date().toISOString())
+      .bind(id, slug, name, cadence, session.playerId, session.playerId, new Date().toISOString())
       .run();
 
     const campaign = stub(env, id);
@@ -263,7 +267,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
   }
 
-  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})(\/[a-z]+)?$/.exec(path);
+  // Up to two segments, because the DM endpoints are nested (`/dm/beat`,
+  // `/dm/window`). Group 2 still captures the whole action with its leading
+  // slash — `/invite`, `/action`, `/dm/window` — so every `action === "/…"`
+  // comparison below is unaffected by the widening.
+  const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})((?:\/[a-z]+){0,2})?$/.exec(path);
   if (campaignMatch) {
     const campaign = await campaignBySlug(env, campaignMatch[1]!);
     if (!campaign) return fail(404, "no such campaign");
@@ -286,6 +294,33 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         expiresInDays: INVITE_TTL_DAYS,
       });
     }
+
+    // The seat moves by host or by the sitting DM. Reading who holds it is a
+    // member-level fact and is served by the campaign GET below, not here.
+    if (action === "/dm" && method === "POST") {
+      const seat = await getSeat(env.DB, campaign.id);
+      const isHost = campaign.created_by === session.playerId;
+      const isDm = seat?.dmPlayerId === session.playerId;
+      if (!isHost && !isDm) return fail(403, "only the host or the current DM can move the seat");
+
+      // `readJson` is an unchecked cast over network input, so the shape has to
+      // be checked here rather than trusted. Handing D1 a non-string to bind
+      // throws inside the driver, which would surface a malformed request as a
+      // 500. An absent `playerId` means vacate, the same as an explicit null.
+      const body = await readJson<{ playerId?: unknown }>(request);
+      const target = body?.playerId ?? null;
+      if (target !== null) {
+        if (typeof target !== "string") {
+          return fail(400, "playerId must be a player id, or null to vacate the seat");
+        }
+        if (!(await isMember(env, campaign.id, target))) {
+          return fail(400, "that person is not in this campaign");
+        }
+      }
+      await setSeat(env.DB, campaign.id, target);
+      return json({ ok: true, dmPlayerId: target });
+    }
+
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
