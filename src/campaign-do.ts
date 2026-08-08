@@ -621,9 +621,19 @@ export class CampaignDO extends DurableObject<Env> {
     if (events.length === 0) return;
     const now = new Date().toISOString();
     const stmt = this.env.DB.prepare(
+      // `DO NOTHING` was correct while events were append-only-immutable — an
+      // id could only be re-seen on a harmless replay of the same insert.
+      // `target_ids` breaks that premise: rows written before this fix are
+      // already in D1 with target_ids='[]', so the row every backfill needs
+      // to touch is exactly the row that already exists. `DO NOTHING` would
+      // make reproject() a no-op for the one column it exists to repair, so
+      // the upsert widens to that column only — summary, significance, and
+      // data stay immutable, matching #writeEntities below (~L668), which
+      // already uses DO UPDATE SET for the same reason: its rows are
+      // expected to change on replay.
       `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id, summary, significance, target_ids, data, created_at)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(campaign_id, event_id) DO NOTHING`,
+       ON CONFLICT(campaign_id, event_id) DO UPDATE SET target_ids = excluded.target_ids`,
     );
     try {
       // D1 batches are capped; chunk so a busy genesis does not exceed it.

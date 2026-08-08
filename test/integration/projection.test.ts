@@ -4,6 +4,15 @@
  * For many event kinds `actorId` is null and `targetIds` is the only link back
  * to the entity, so without this the read model can answer "what did X do" but
  * not "what happened to X". See issue #7.
+ *
+ * Two kinds of coverage live here. The first `describe` composes raw SQL
+ * against a self-declared schema — it documents the `json_each` query
+ * semantics and the upsert-conflict behavior directly, cheaply, and in
+ * isolation. It does NOT exercise `src/campaign-do.ts` at all: reverting
+ * `#writeEvents` to before this fix leaves it green. The second `describe`
+ * drives the real `CampaignDO` — `resolveTick` and `reproject` — through its
+ * actual public RPCs, so the column bind and the upsert clause are both
+ * exercised for real, and a regression in either one fails this file.
  */
 
 import { env as runtimeEnv } from "cloudflare:workers";
@@ -22,7 +31,7 @@ CREATE TABLE IF NOT EXISTS events (campaign_id TEXT NOT NULL, event_id TEXT NOT 
 
 const CAMPAIGN = "cmp_projection";
 
-describe("event projection", () => {
+describe("event projection — raw SQL, schema and upsert semantics", () => {
   beforeAll(async () => {
     for (const stmt of SCHEMA.split(";").map((s) => s.trim()).filter(Boolean)) {
       await env.DB.prepare(stmt).run();
@@ -76,31 +85,123 @@ describe("event projection", () => {
     expect(row?.target_ids).toBe("[]");
   });
 
-  it("replaying an event through the same insert populates target_ids", async () => {
-    // Stands in for reproject(): the DO replays retained WorldEvent objects
-    // through #writeEvents, so anything that path writes, the repair writes.
-    const replay = { targetIds: ["fac_2", "stl_1"], data: {} };
+  it("a replay upsert repairs a stale row instead of leaving it untouched", async () => {
+    // The shape every row needing backfill is actually in: already in D1,
+    // written before this fix, target_ids left at the column default.
+    await env.DB.prepare(
+      `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id,
+                           summary, significance, target_ids, data, created_at)
+       VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, '[]', '{}', ?)`,
+    )
+      .bind(CAMPAIGN, "evt_replay", 7, "war_declared", "War was declared.", 80, new Date().toISOString())
+      .run();
+
+    // The same event_id, replayed through the same insert shape #writeEvents
+    // uses, carrying the real ids — this is what reproject() does. The row
+    // already exists, so this is a genuine conflict: with `ON CONFLICT ...
+    // DO NOTHING` the replay is silently discarded and the row stays stale
+    // forever, because the row already existing is exactly why it needed
+    // backfilling. See #writeEvents in src/campaign-do.ts for why the clause
+    // is `DO UPDATE SET target_ids = excluded.target_ids`, not `DO NOTHING`.
     await env.DB.prepare(
       `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id,
                            summary, significance, target_ids, data, created_at)
        VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?, ?, ?)
-       ON CONFLICT(campaign_id, event_id) DO NOTHING`,
+       ON CONFLICT(campaign_id, event_id) DO UPDATE SET target_ids = excluded.target_ids`,
     )
       .bind(
         CAMPAIGN, "evt_replay", 7, "war_declared", "War was declared.", 80,
-        JSON.stringify(replay.targetIds), JSON.stringify(replay.data),
-        new Date().toISOString(),
+        JSON.stringify(["fac_2", "stl_1"]), "{}", new Date().toISOString(),
       )
       .run();
 
-    const found = await env.DB.prepare(
-      `SELECT event_id FROM events
-       WHERE campaign_id = ?1
+    const row = await env.DB.prepare(
+      "SELECT target_ids FROM events WHERE campaign_id = ? AND event_id = ?",
+    )
+      .bind(CAMPAIGN, "evt_replay")
+      .first<{ target_ids: string }>();
+
+    expect(JSON.parse(row?.target_ids ?? "[]")).toEqual(["fac_2", "stl_1"]);
+  });
+});
+
+describe("event projection — the real DO", () => {
+  // Everything above composes raw SQL. Nothing there loads
+  // `src/campaign-do.ts`, so nothing there would notice the `target_ids`
+  // bind being dropped or reordered inside `#writeEvents`, or the upsert
+  // clause being reverted to `DO NOTHING`. This drives the actual production
+  // call paths — `resolveTick` -> `#project` -> `#writeEvents`, and
+  // `reproject` -> `#writeEvents` — through the real `CampaignDO` RPC.
+  const CAMPAIGN_ID = "cmp_projection_do";
+
+  it("resolveTick writes real target_ids, and reproject repairs a stale row", async () => {
+    const stub = env.CAMPAIGN.get(env.CAMPAIGN.idFromName(CAMPAIGN_ID));
+
+    await stub.init({
+      campaignId: CAMPAIGN_ID,
+      slug: "projection-do",
+      name: "Projection DO Test",
+      cadence: "weekly",
+      // Small on purpose: the test only needs the initial roster, not a deep
+      // pre-play history.
+      historyYears: 1,
+    });
+
+    const world = await stub.debugWorld();
+    const settlement = Object.values(world.settlements)[0];
+    if (!settlement) throw new Error("genesis produced no settlements to target");
+
+    await stub.join("plr_1", "Tester", "scout");
+    // No ANTHROPIC_API_KEY in tests, so intent parsing falls back to
+    // src/dm/intent.ts `parseIntentKeywords`, which resolves the longest
+    // named entity mentioned in the text to `targetId`. Naming the
+    // settlement here is what makes the resulting event's targetIds
+    // deterministic, rather than depending on a random drift crossing a
+    // threshold (genesis events default targetIds to `[]` — see
+    // src/sim/events.ts — so genesis alone would not exercise this).
+    const submitted = await stub.submitAction(
+      "plr_1",
+      `I investigate what is happening in ${settlement.name}.`,
+      "web",
+    );
+    // One active character and the default quorumFraction of 0.5 give a
+    // quorum of 1, so this single submission resolves the tick immediately
+    // inside submitAction — no separate resolveTick call needed.
+    expect(submitted.resolvedNow).toBe(true);
+
+    const rows = await env.DB.prepare(
+      `SELECT event_id, target_ids FROM events
+       WHERE campaign_id = ?1 AND kind = 'player_action'
          AND EXISTS (SELECT 1 FROM json_each(events.target_ids) WHERE value = ?2)`,
     )
-      .bind(CAMPAIGN, "fac_2")
-      .all<{ event_id: string }>();
+      .bind(CAMPAIGN_ID, settlement.id)
+      .all<{ event_id: string; target_ids: string }>();
+    expect(rows.results).toHaveLength(1);
+    const eventId = rows.results![0]!.event_id;
 
-    expect(found.results).toHaveLength(1);
+    // Simulate a pre-fix row: this is what every row written before this
+    // node landed looks like today.
+    await env.DB.prepare("UPDATE events SET target_ids = '[]' WHERE campaign_id = ? AND event_id = ?")
+      .bind(CAMPAIGN_ID, eventId)
+      .run();
+    const stale = await env.DB.prepare(
+      "SELECT target_ids FROM events WHERE campaign_id = ? AND event_id = ?",
+    )
+      .bind(CAMPAIGN_ID, eventId)
+      .first<{ target_ids: string }>();
+    expect(stale?.target_ids).toBe("[]");
+
+    // reproject() replays the DO's retained `history` — real WorldEvent
+    // objects, targetIds included — through the same #writeEvents. This is
+    // spec §7's backfill claim, exercised end to end rather than asserted.
+    const result = await stub.reproject();
+    expect(result.events).toBeGreaterThan(0);
+
+    const repaired = await env.DB.prepare(
+      "SELECT target_ids FROM events WHERE campaign_id = ? AND event_id = ?",
+    )
+      .bind(CAMPAIGN_ID, eventId)
+      .first<{ target_ids: string }>();
+    expect(JSON.parse(repaired?.target_ids ?? "[]")).toContain(settlement.id);
   });
 });

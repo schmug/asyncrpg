@@ -131,6 +131,15 @@ Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
   immediately after `wrangler deploy` produced three separate false failures.
 - **Secrets** are set: `ANTHROPIC_API_KEY` is live (the user set it). Narration
   degrades to templated prose without it, and that path is tested.
+- **D1 migrations are not automated.** `wrangler deploy` does not apply them,
+  and CI does not either — this is a deliberate, documented-not-automated
+  decision, not an oversight. `#writeEvents` and `#writeEntities` swallow D1
+  failures into `#recordProjectionFailure` on purpose (a D1 blip must not
+  wedge a tick), which means a code deploy that lands before its matching
+  migration does not error — it silently stops projecting on every tick while
+  dashboards stay green. Run `wrangler d1 migrations apply` by hand, before
+  deploying code that depends on the new column. `migrations/0005_event_targets.sql`
+  carries this warning inline as the concrete example.
 
 ## Repo map
 
