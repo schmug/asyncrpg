@@ -26,7 +26,7 @@ import {
 import type { Session } from "./auth";
 import { sendMagicLink } from "./email/outbound";
 import { handleInboundEmail } from "./email/inbound";
-import { getSeat, setSeat } from "./dm/seat";
+import { getSeat, resolveWindowMs, setSeat } from "./dm/seat";
 import { renderChronicle } from "./web/chronicle";
 import type { Env } from "./env";
 
@@ -187,7 +187,9 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (campaign.public_chronicle !== 1 && !(session && (await isMember(env, campaign.id, session.playerId)))) {
       return new Response("This chronicle is private.", { status: 403 });
     }
-    return renderChronicle(env, campaign);
+    // The reader is passed through so the chronicle can make the one exception
+    // it has to make: the DM sees the beat they are holding, nobody else does.
+    return renderChronicle(env, campaign, session?.playerId ?? null);
   }
 
   // ─── joining by invitation ─────────────────────────────────────────────
@@ -334,6 +336,158 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       return json({ ok: true, dmPlayerId: target });
     }
 
+    // Everything below the seat itself requires holding it *and* being in the
+    // campaign. The general membership check further down is deliberately not
+    // what these endpoints lean on: they answer before it, so that a non-member
+    // and a member without the seat get the identical 403 and neither refusal
+    // becomes an oracle for who is in the campaign.
+    //
+    // Holding the seat already implies membership — `/dm` is the only writer of
+    // the column and it refuses a non-member — so the second condition is
+    // unreachable today. It is here because that invariant is enforced in a
+    // different branch of a different check, and `/dm/review` reads the beat
+    // deliberately unfiltered on the strength of it. A membership-removal path
+    // that forgets to clear the seat would, with no change to this file, hand a
+    // stranger the held prose, canon, and a publish that mails their rewrite to
+    // every player. The review desk is safe on its own merits instead.
+    if (action?.startsWith("/dm/")) {
+      const seat = await getSeat(env.DB, campaign.id);
+      if (!member || seat?.dmPlayerId !== session.playerId) {
+        return fail(403, "only the DM can do that");
+      }
+
+      // Spec §8: the DM endpoints are rate-limited on the same mechanism as
+      // actions. `/dm/beat` writes up to 20 KB of prose per call, which makes
+      // an unbounded one the cheapest way in this API to make D1 do work.
+      //
+      // 30 a minute rather than `/action`'s 12: reviewing a turn is a burst —
+      // open the desk, reread, rewrite a paragraph, reread, publish — where
+      // submitting a turn is a single considered act. It is still an order of
+      // magnitude under what a script does and a large multiple of the busiest
+      // real minute. Keyed to the player and placed behind the seat check, so
+      // nobody else's refusals can spend the DM's budget for them.
+      if (!(await rateLimit(env, `dm:${session.playerId}`, 30))) {
+        return fail(429, "slow down a moment");
+      }
+
+      if (action === "/dm/review" && method === "GET") {
+        const [state, latest] = await Promise.all([
+          campaignStub.reviewState(),
+          // Deliberately unfiltered: this endpoint is the review desk, and the
+          // seat check above is what makes that safe. It is the only read path
+          // in this file that may return an unpublished beat.
+          env.DB.prepare(
+            `SELECT tick, prose, situation, source, published_at, revised_by, original_prose
+             FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 1`,
+          )
+            .bind(campaign.id)
+            .first<{
+              tick: number;
+              prose: string;
+              situation: string;
+              source: string;
+              published_at: string | null;
+              revised_by: string | null;
+              original_prose: string | null;
+            }>(),
+        ]);
+        return json({
+          ok: true,
+          phase: state.phase,
+          windowClosesAt: state.windowClosesAt,
+          beat: latest
+            ? {
+                tick: latest.tick,
+                prose: latest.prose,
+                situation: latest.situation,
+                source: latest.source,
+                held: latest.published_at === null,
+                publishedAt: latest.published_at,
+                revisedBy: latest.revised_by,
+                originalProse: latest.original_prose,
+              }
+            : null,
+        });
+      }
+
+      if (action === "/dm/beat" && method === "PATCH") {
+        // A rewrite has to be something the caller *said*. `readJson` answers
+        // `null` for an unparseable body and, identically, for one past the
+        // 32 KB cap, so the envelope is checked before any field is read.
+        const body = await readJson<Record<string, unknown>>(request);
+        if (body === null || typeof body !== "object" || Array.isArray(body)) {
+          return fail(400, "send { tick, prose }");
+        }
+        if (!Number.isInteger(body.tick)) return fail(400, "which turn?");
+        if (typeof body.prose !== "string") return fail(400, "prose must be text");
+        const prose = body.prose.trim();
+        if (!prose) return fail(400, "write something, or leave it as it is");
+        // Generous, but not unbounded: a beat is a few hundred words.
+        if (prose.length > 20_000) return fail(400, "that is too long for one beat");
+
+        // `original_prose` is set only once, so it stays what the machine wrote
+        // rather than sliding to the DM's previous draft on every edit.
+        //
+        // `published_at` is deliberately untouched: editing after publication
+        // is a supported thing to do, and it must neither un-publish the beat
+        // nor mail it a second time — mail is sent only by `publishHeldBeat`,
+        // which this path never calls.
+        const out = await env.DB.prepare(
+          `UPDATE beats
+             SET prose = ?,
+                 original_prose = COALESCE(original_prose, prose),
+                 revised_by = ?
+           WHERE campaign_id = ? AND tick = ?`,
+        )
+          .bind(prose, session.playerId, campaign.id, body.tick)
+          .run();
+        if (!out.meta.changes) return fail(404, "no such turn");
+        return json({ ok: true, tick: body.tick });
+      }
+
+      if (action === "/dm/publish" && method === "POST") {
+        const out = await campaignStub.publishHeldBeat();
+        return json({ ok: true, ...out });
+      }
+
+      if (action === "/dm/window" && method === "PATCH") {
+        // `null` means "back to the cadence default"; `0` means "publish now
+        // and let me edit afterwards". Both are real settings, so neither may
+        // collapse into the other — and neither may be what a *missing* body
+        // decays into. An absent envelope or an absent `ms` is a 400, never a
+        // silent reset.
+        const body = await readJson<Record<string, unknown>>(request);
+        if (
+          body === null ||
+          typeof body !== "object" ||
+          Array.isArray(body) ||
+          !("ms" in body)
+        ) {
+          return fail(400, "send { ms }, or { ms: null } to return to the cadence default");
+        }
+        const requested = body.ms;
+        if (requested === null) {
+          await env.DB.prepare("UPDATE campaigns SET review_window_ms = NULL WHERE id = ?")
+            .bind(campaign.id)
+            .run();
+          return json({ ok: true, ms: resolveWindowMs(campaign.cadence, null), clamped: false });
+        }
+        // Integer, because the column is one: SQLite would keep a fractional
+        // millisecond as a REAL and the stored value would stop matching the
+        // declared type.
+        if (typeof requested !== "number" || !Number.isInteger(requested) || requested < 0) {
+          return fail(400, "a window is a whole number of milliseconds, or null");
+        }
+        const effective = resolveWindowMs(campaign.cadence, requested);
+        await env.DB.prepare("UPDATE campaigns SET review_window_ms = ? WHERE id = ?")
+          .bind(effective, campaign.id)
+          .run();
+        // Clamping is reported rather than applied quietly: a DM who asked for
+        // a month and got 56 hours needs to know the cap exists.
+        return json({ ok: true, ms: effective, clamped: effective !== requested });
+      }
+    }
+
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
@@ -341,11 +495,20 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         campaignStub.snapshot(),
         campaignStub.promptForPlayer(session.playerId),
         campaignStub.mySheet(session.playerId),
-        env.DB.prepare(
-          "SELECT tick, prose, source FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 1",
-        )
-          .bind(campaign.id)
-          .first<{ tick: number; prose: string; source: string }>(),
+        // The DM sees the held beat — they cannot review what they cannot see.
+        // Everyone else sees the most recent *published* one, which is a
+        // fallback to the previous turn rather than to nothing.
+        (async () => {
+          const seat = await getSeat(env.DB, campaign.id);
+          const dmSees = seat?.dmPlayerId === session.playerId;
+          return env.DB.prepare(
+            "SELECT tick, prose, source, published_at FROM beats WHERE campaign_id = ? " +
+              (dmSees ? "" : "AND published_at IS NOT NULL ") +
+              "ORDER BY tick DESC LIMIT 1",
+          )
+            .bind(campaign.id)
+            .first<{ tick: number; prose: string; source: string; published_at: string | null }>();
+        })(),
         env.DB.prepare(
           "SELECT COUNT(*) AS n FROM projection_failures WHERE campaign_id = ? AND resolved_at IS NULL",
         )
@@ -356,7 +519,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         campaign: { slug: campaign.slug, ...snapshot },
         prompt,
         you: sheet,
-        latestBeat: latest ?? null,
+        latestBeat: latest
+          ? {
+              tick: latest.tick,
+              prose: latest.prose,
+              source: latest.source,
+              held: latest.published_at === null,
+            }
+          : null,
         playerId: session.playerId,
         isHost: campaign.created_by === session.playerId,
         // Surfaced to the host so a chronicle drifting from canon is visible
