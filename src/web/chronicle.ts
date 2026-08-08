@@ -8,6 +8,7 @@
 
 import { renownLabel } from "../sim/character";
 import { escapeHtml } from "../email/outbound";
+import { getSeat } from "../dm/seat";
 import type { Env } from "../env";
 
 interface CampaignRow {
@@ -21,6 +22,8 @@ interface BeatRow {
   prose: string;
   source: string;
   created_at: string;
+  published_at: string | null;
+  revised_by: string | null;
 }
 
 interface EventRow {
@@ -57,6 +60,9 @@ h2{font-size:.78rem;text-transform:uppercase;letter-spacing:.09em;color:var(--mu
 .beat p:last-child{margin-bottom:0}
 .tag{font:500 .66rem/1 system-ui,sans-serif;color:var(--muted);border:1px solid var(--rule);
   border-radius:99px;padding:.24rem .5rem;text-transform:none;letter-spacing:.02em}
+/* Only the DM is ever served one of these, and it must not read as published. */
+.tag.held{color:var(--accent);border-color:var(--accent)}
+.beat .d{color:var(--muted);font-size:.83rem;font-style:italic;margin:.2rem 0 0}
 ol.tl{list-style:none;margin:0;padding:0;border-left:2px solid var(--rule)}
 ol.tl li{padding:.42rem 0 .42rem 1rem;position:relative}
 ol.tl li::before{content:"";position:absolute;left:-5px;top:.95rem;width:8px;height:8px;
@@ -82,19 +88,57 @@ const KIND_LABEL: Record<string, string> = {
   character: "The party",
 };
 
-export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<Response> {
+/**
+ * Render the chronicle as `viewerId` is allowed to see it.
+ *
+ * `viewerId` is the signed-in reader, or `null` for a logged-out one. It exists
+ * for exactly one reason: a beat held for DM review is not part of the
+ * chronicle yet, and the DM is the sole exception to that — they cannot review
+ * what they cannot see. Everyone else, member or stranger, gets the published
+ * story and nothing else.
+ */
+export async function renderChronicle(
+  env: Env,
+  campaign: CampaignRow,
+  viewerId: string | null = null,
+): Promise<Response> {
+  // Only a signed-in reader can possibly hold the seat, so an anonymous view
+  // costs no extra query.
+  const viewerIsDm = viewerId !== null && (await getSeat(env.DB, campaign.id))?.dmPlayerId === viewerId;
+
+  // Every held-content filter below is this one clause, so the exception is
+  // granted in exactly one place and cannot drift between the beats and the
+  // timeline.
+  const heldFilter = viewerIsDm ? "" : "AND published_at IS NOT NULL ";
+
   const [beats, events, entities, journals, letters, history] = await Promise.all([
     env.DB.prepare(
-      "SELECT tick, prose, source, created_at FROM beats WHERE campaign_id = ? ORDER BY tick DESC LIMIT 25",
+      "SELECT tick, prose, source, created_at, published_at, revised_by FROM beats " +
+        `WHERE campaign_id = ? ${heldFilter}ORDER BY tick DESC LIMIT 25`,
     )
       .bind(campaign.id)
       .all<BeatRow>(),
     // Tick 0 is the generated pre-play history — decades of it. Mixed into the
     // live timeline it drowns everything the group actually did, which is the
     // opposite of what a chronicle is for. Queried and rendered separately.
+    //
+    // Events are written when a tick *resolves*, not when its beat publishes,
+    // so without the `NOT EXISTS` clause the timeline narrates the held turn to
+    // everyone while the prose is still hidden — the same leak by a quieter
+    // route. The clause is deliberately "there is a beat and it is held" rather
+    // than "there is a published beat": a tick whose beat failed to project has
+    // no beat row at all, and those events must stay visible exactly as they
+    // are today rather than silently vanishing from every existing chronicle.
     env.DB.prepare(
       `SELECT tick, kind, summary, significance FROM events
        WHERE campaign_id = ? AND tick > 0 AND significance >= 55
+       ${
+         viewerIsDm
+           ? ""
+           : `AND NOT EXISTS (SELECT 1 FROM beats b
+                WHERE b.campaign_id = events.campaign_id AND b.tick = events.tick
+                  AND b.published_at IS NULL)`
+       }
        ORDER BY tick DESC, significance DESC LIMIT 60`,
     )
       .bind(campaign.id)
@@ -142,11 +186,18 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
           (b) =>
             `<article class="beat"><p class="t">Tick ${b.tick}` +
             (b.source === "templated" ? `<span class="tag">recorded without narration</span>` : "") +
+            // Only the DM ever gets a held beat here, and it must not read as
+            // published to them — they are looking at it in order to decide.
+            (b.published_at === null ? `<span class="tag held">held for review</span>` : "") +
             `</p>` +
             b.prose
               .split(/\n{2,}/)
               .map((p) => `<p>${escapeHtml(p)}</p>`)
               .join("") +
+            // Attribution is deliberately not a name: the chronicle is public,
+            // and "the DM" is the fact a reader needs. Who holds the seat is
+            // visible in-app to members.
+            (b.revised_by ? `<p class="d">Edited by the DM.</p>` : ``) +
             `</article>`,
         )
         .join("")
@@ -307,7 +358,14 @@ export async function renderChronicle(env: Env, campaign: CampaignRow): Promise<
   return new Response(html, {
     headers: {
       "content-type": "text/html; charset=utf-8",
-      "cache-control": "public, max-age=60",
+      // The page now varies by reader — the DM's copy carries a beat nobody
+      // else may see, and a private chronicle is only rendered for a member at
+      // all. Either one served under the anonymous page's `public` freshness
+      // would let a shared cache hand it to the next reader, leaking a held
+      // beat without a single read path being wrong. Only the anonymous view
+      // of a public chronicle is the same for everybody, so only it is
+      // publicly cacheable.
+      "cache-control": viewerId === null ? "public, max-age=60" : "private, no-store",
     },
   });
 }

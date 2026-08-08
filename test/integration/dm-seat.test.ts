@@ -392,12 +392,16 @@ describe("dm seat", () => {
     });
 
     it("routes a nested two-segment action into the campaign branch", async () => {
-      // What the widening is for: `/dm/window` and `/dm/beat` land in Tasks 4
-      // and 6. Until then they must 405 from inside the branch, not 404 from
-      // outside it — that is the difference the regex makes.
+      // What the widening is for. `/dm/window` and `/dm/beat` have since landed
+      // (Tasks 5 and 6), so the proof that these reach the campaign branch is
+      // no longer a 405 but the seat guard answering 403: `plr_two` does not
+      // hold the seat in this fixture. Either way the point is the contrast
+      // with the sibling test below — anything nested outside `/dm` 404s from
+      // *outside* the branch, and that is the difference the regex makes.
       for (const path of ["/api/campaigns/seat/dm/window", "/api/campaigns/seat/dm/beat"]) {
         const res = await call(path, { method: "POST", playerId: "plr_two" });
-        expect(res.status, path).toBe(405);
+        expect(res.status, path).toBe(403);
+        expect(await res.json(), path).toEqual({ error: "only the DM can do that" });
       }
     });
 
