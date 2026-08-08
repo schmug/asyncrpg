@@ -37,7 +37,7 @@ background and read `critic-reports/cycle-03.json`.
 
 | Command | Result |
 |---|---|
-| `npm test` | 182 passing |
+| `npm test` | 264 passing |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | invariants hold, replay identical, economy and state size bounded |
 | `node scripts/smoke.mjs <url>` | 67/67, mostly adversarial |
@@ -78,6 +78,68 @@ list` so a skew is visible, but the fix is to not create one.
 - **Dossier** — dead NPCs no longer flood the "People" grid (26 of 28 cards
   were dead); the notable dead get a capped "Remembered" section.
 
+## The human DM role — slice 1 (landed)
+
+Spec: [`docs/specs/2026-08-08-dm-role-design.md`](specs/2026-08-08-dm-role-design.md).
+Plan: `docs/plans/2026-08-08-dm-role-slice-1.md`. The spec phases the feature
+into three slices; **only slice 1 is built.**
+
+What slice 1 landed:
+
+- **The DM seat** — `campaigns.dm_player_id`, a single column, so "exactly one
+  DM" is structural rather than a rule someone has to enforce. It defaults to
+  the campaign creator at create time, moves by host or by the sitting DM to any
+  member, is reclaimable by the host unconditionally, and can be vacated. See
+  `src/dm/seat.ts` and the `/dm` handler in `src/index.ts`.
+- **The review window** — the DO alarm became a two-phase machine
+  (`phase=open` → resolve; `phase=review` → publish). A resolved beat is written
+  with `published_at` NULL, held, and fanned out when the window closes.
+  `#openReviewWindow` / `publishHeldBeat` / `#scheduleNextTick` in
+  `src/campaign-do.ts`.
+- **Prose editing and attribution** — `beats.original_prose` and
+  `beats.revised_by` keep "who generated it" and "who edited it" as separate
+  facts; `beats.source` keeps its old meaning.
+- **Migration** `migrations/0005_dm.sql`, including the backfill that sets
+  `published_at = created_at` on every existing beat. Without it every
+  historical beat vanishes from the chronicle.
+
+Things that are easy to get wrong here and are already decided:
+
+- **The cadence clock does not move.** The window is carved out of the front of
+  the next cycle, never added to it. Canon advances on schedule; only delivery
+  waits. There is a test for the no-drift property — do not "fix" it by adding
+  the window to the deadline.
+- **A vacant seat means today's behaviour, exactly.** `#reviewWindowMs` returns
+  0 when `dm_player_id` is NULL, and a window of 0 skips the review phase
+  entirely. A D1 read failure there also returns 0 — a blip in the read model
+  must degrade to publishing, never to a beat sitting unseen.
+- **Publication is idempotent and self-healing.** It is keyed on
+  `published_at IS NULL`, `phase` is cleared before any mail is sent, and the
+  next tick's resolution publishes a still-held beat *before* advancing canon.
+  Between those there is no state in which a resolved beat is never seen.
+- **Quorum during a review window does not resolve the next turn.**
+
+Not built, specified in full:
+
+- **Slice 2 — typed canon ops.** `DmOp[]` validated against
+  `checkWorldInvariants`, clamping, the `dm_edits` audit table with
+  `prior_value` for exact undo, chronicle attribution. This is the slice that
+  actually gives a DM authority over world state. Until it ships, the
+  simulation is still the only writer of canon.
+- **Slice 3 — the free-text front door.** Haiku proposes typed ops on the web
+  for confirmation; email applies with a receipt and a one-click undo. No new
+  authority — it is an ergonomic layer over slice 2's ops.
+- **Seat reversion after three untouched windows.** `#countMissedWindow` and
+  `#resetMissedWindows` in `src/campaign-do.ts` are deliberate no-ops, and the
+  `campaigns.dm_missed_windows` column exists to hold the count. Today an
+  expired window costs the DM nothing.
+
+**The README and spec §5 describe exactly this split**, and the wording matters:
+the critic's `async` category scores "is the no-penalty promise real in code?"
+and reads any vagueness as a regression. The README states plainly that no DM
+can change world state yet, so every campaign currently gets the promise
+absolutely. If slice 2 lands, that sentence has to change with it.
+
 ## Outstanding findings from cycle 2
 
 Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
@@ -116,7 +178,12 @@ Read `critic-reports/cycle-02.json` for full detail. Not yet addressed:
 - **The no-penalty promise is stated precisely** in `docs/specs/...#5` and the
   README. Absence costs nothing; engagement earns story presence, not power.
   The critic reads any differential as a penalty — the honest answer is the
-  precise wording, not removing the depth features the user asked for.
+  precise wording, not removing the depth features the user asked for. Since
+  2026-08-08 the promise is **split**: the *simulation* never penalizes absence
+  (tests plus the 1500-tick soak), and a *human DM* has recorded, attributed
+  authority over canon. Copy the wording from
+  `docs/specs/2026-08-08-dm-role-design.md` §10 verbatim wherever it appears —
+  it is load-bearing and a paraphrase reads as a regression.
 - **Determinism is load-bearing.** No `Math.random()` anywhere in `src/sim`.
   Entity ids are positional on `(tick, sequence)`; a previous size-derived
   scheme silently overwrote live entities once pruning could delete things.
@@ -139,6 +206,7 @@ src/sim/       deterministic world model — pure, no I/O
   prng • types • invariants • names • genesis • drift • actions
   character • tick • downtime • prune • events
 src/dm/        narrate (Sonnet 5) • intent (Haiku 4.5) • fallback (no inference)
+               seat (the human DM seat + review-window defaults and caps)
 src/email/     parse • inbound • outbound • loopback (inbound-path proof)
 src/web/       chronicle (server-rendered, no-JS readable)
 src/           index (router) • campaign-do (the campaign) • auth • env

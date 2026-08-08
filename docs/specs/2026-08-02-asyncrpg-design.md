@@ -111,6 +111,31 @@ first. An eager group moves fast; a slow group still moves.
 
 ## 5. Absence — the no-penalty promise
 
+> **Implementation note (2026-08-08):** this section's promise was written when
+> the simulation was the only thing that could write canon. The human DM role
+> specified in [`2026-08-08-dm-role-design.md`](./2026-08-08-dm-role-design.md)
+> adds a second, bounded write path, so the promise splits. It is restated —
+> more precisely, not more weakly — as:
+>
+> > The **simulation** never penalizes absence — never, for any length of
+> > absence, costs you attributes, skills, renown, items, conditions, your life,
+> > or access to anything. That is enforced by tests and proven by a 1500-tick
+> > soak.
+> >
+> > A **human DM** has full authority over canon, and every edit they make is
+> > recorded and attributed in the chronicle. Campaigns with no DM — and
+> > campaigns whose DM edits nothing — get the promise absolutely.
+>
+> Everything below this note is the simulation-side promise, and it is unchanged
+> and still enforced. `sim:soak` runs with zero DM ops, so it goes on proving
+> exactly what it proved before.
+>
+> Slice 1 of the DM role — the seat, the review window, and prose editing — is
+> the only part built. It touches world state not at all, so **as of this note
+> every campaign gets the promise absolutely**, DM or no DM. The typed canon ops
+> of §5 of that spec, which are what would make a DM's authority real, are
+> specified and unbuilt.
+
 | Missed ticks | Behavior |
 |---|---|
 | 1–2 | `drifting`: Haiku selects a low-risk action consistent with the character's `tendencies` and the current scene. The character stays in the scene. The chronicle marks the action `[drifting]` so the group can see it was not a real choice. |
