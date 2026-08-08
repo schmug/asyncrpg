@@ -12,6 +12,8 @@
     "test:watch": "vitest",
     "sim:soak": "tsx scripts/sim-soak.ts",
     "smoke": "node scripts/smoke.mjs",
+    "smoke:local": "node scripts/smoke.mjs --local",
+    "smoke:prod": "node scripts/smoke.mjs --remote",
     "ui-smoke": "node scripts/ui-smoke.mjs",
     "critic": "node scripts/critic.mjs"
   },
