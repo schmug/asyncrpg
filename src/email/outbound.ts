@@ -206,8 +206,17 @@ export interface ReviewNotice {
   origin: string;
 }
 
+/**
+ * Where the DM goes to review a held beat.
+ *
+ * Deliberately the campaign page and not a `/review` sub-route: the app's
+ * router matches `#/c/<slug>` exactly (`public/app.js`), so a trailing segment
+ * falls through to the campaign list and the DM lands nowhere useful. The
+ * review desk is not a separate screen anyway — it renders inline on the
+ * campaign page for whoever holds the seat, so this link already arrives at it.
+ */
 function reviewUrl(opts: ReviewNotice): string {
-  return `${opts.origin}/#/c/${encodeURIComponent(opts.campaignSlug)}/review`;
+  return `${opts.origin}/#/c/${encodeURIComponent(opts.campaignSlug)}`;
 }
 
 export function reviewNoticeBody(opts: ReviewNotice): string {

@@ -139,6 +139,25 @@ describe("review notice", () => {
     it("says when the window closes", () => {
       expect(body()).toContain(new Date(Date.parse("2026-08-09T12:00:00Z")).toUTCString());
     });
+
+    it("links somewhere the app can actually route to", () => {
+      // This shipped broken: the notice pointed at `#/c/<slug>/review`, and the
+      // client router matches `#/c/<slug>` exactly, so the one link in the one
+      // email this feature sends dropped the DM on their campaign list.
+      //
+      // The pattern is duplicated from `public/app.js` rather than imported —
+      // it lives in browser code with no module boundary — so this test is a
+      // copy that will not notice if the router itself changes. It is still
+      // worth having: a dead link in the notice is the failure that actually
+      // happened, and nothing else in the suite looks at the URL at all.
+      const ROUTE = /^#\/c\/([a-z0-9-]{2,31})$/;
+      const url = body()
+        .split(/\s+/)
+        .find((word) => word.startsWith("https://play.example.com"));
+
+      expect(url, "the notice should carry a link at all").toBeDefined();
+      expect(ROUTE.test(new URL(url!).hash)).toBe(true);
+    });
   });
 
   describe("delivery", () => {
