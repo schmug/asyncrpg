@@ -222,6 +222,29 @@ summary {
   padding: 0.24rem 0.5rem;
   margin-bottom: 0.6rem;
 }
+/* The DM's review desk.
+   Every selector below is an id introduced by #dm-box — no bare tag selector,
+   and no descendant selector that could reach a control outside the panel. A
+   rule like `#dm-box textarea` would be scoped correctly and still be the wrong
+   shape here: it invites the next one that is not. The panel deliberately keeps
+   the page background so the card-coloured controls inside it stay legible as
+   controls. */
+#dm-box {
+  border: 1px solid var(--rule);
+  border-radius: 10px;
+  padding: 1.05rem 1.15rem;
+  margin: 1.5rem 0 0;
+}
+#dm-heading { margin-top: 0; }
+/* A beat is several paragraphs. The 7rem default turns reviewing one into
+   scrolling a porthole. */
+#dm-prose { min-height: 13rem; }
+#dm-seat-details { margin-top: 1.5rem; }
+
+/* Two tags only ever co-occur on a held beat, so this rule cannot change any
+   rendering that predates the review phase. */
+#beat .tag + .tag { margin-left: 0.4rem; }
+
 #sheet dl { margin: 0; }
 #sheet dt {
   font: 600 0.74rem/1.4 system-ui, sans-serif;
