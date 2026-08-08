@@ -21,6 +21,7 @@ import { isDowntimeKind, resolveDowntime } from "./sim/downtime";
 import { narrateBeat } from "./dm/narrate";
 import { parseIntent } from "./dm/intent";
 import { promptFor } from "./dm/fallback";
+import { getSeat, resolveWindowMs } from "./dm/seat";
 import type { Beat, BudgetGuard, DmConfig } from "./dm/narrate";
 import { sendBeat } from "./email/outbound";
 import type { Env } from "./env";
@@ -64,6 +65,8 @@ export type TickSummary = {
   /** Player ids whose action was auto-chosen this tick. */
   drifted: string[];
   reason: "quorum" | "deadline" | "manual";
+  /** True when the beat is waiting on the DM rather than already sent. */
+  held: boolean;
 };
 
 export interface CampaignSnapshot {
@@ -328,7 +331,11 @@ export class CampaignDO extends DurableObject<Env> {
       auto: false,
     }));
 
-    if (isQuorumMet(world, stubs, this.#config())) {
+    // Quorum during a review window must not resolve the next turn: players
+    // would never see the beat they are acting after. The action is accepted
+    // and sits in `pending`, which is parsed at the next resolution anyway, so
+    // it resolves against whatever the DM leaves behind.
+    if (isQuorumMet(world, stubs, this.#config()) && this.#get<string>("phase") !== "review") {
       await this.resolveTick("quorum");
       return { accepted: true, resolvedNow: true };
     }
@@ -392,12 +399,30 @@ export class CampaignDO extends DurableObject<Env> {
   }
 
   override async alarm(): Promise<void> {
+    // One alarm, two meanings. In `review` it ends the DM's window; otherwise
+    // it is the tick clock.
+    if (this.#get<string>("phase") === "review") {
+      await this.publishHeldBeat({ expired: true });
+      return;
+    }
     await this.resolveTick("deadline");
   }
 
   // ─── the tick ──────────────────────────────────────────────────────────
 
   async resolveTick(reason: TickSummary["reason"]): Promise<TickSummary> {
+    // A beat held from a previous window that never published — a lost review
+    // alarm, or a manual resolve mid-window. Publish it *before* canon moves.
+    //
+    // The ordering is load-bearing, not tidiness: `publishHeldBeat` fans the
+    // held beat out under `#world().tick`, so running it after the world
+    // advances would mail tick N's prose stamped as tick N+1 and file the
+    // reply binding against the wrong turn. Ahead of `runTick` the world still
+    // reads the tick the held beat belongs to. It also means a tick that is
+    // about to be rejected for an invariant violation still releases the
+    // previous beat, so no beat is ever stranded unseen.
+    await this.publishHeldBeat({ expired: true });
+
     const world = this.#world();
     const config = this.#config();
     const meta = this.#get<{ name: string; slug: string }>("meta") ?? { name: "Campaign", slug: "c" };
@@ -455,9 +480,15 @@ export class CampaignDO extends DurableObject<Env> {
       // silently does nothing is indistinguishable from an outage to the
       // group, and to anyone debugging it later.
       try {
+        // Published on the spot. A blocked beat has nothing to review — there
+        // is no DM edit that could rescue a turn that did not happen — and
+        // nothing sets `phase` here, so leaving `published_at` NULL would mark
+        // it held with no path that could ever publish it: invisible in the
+        // chronicle, permanently.
+        const now = new Date().toISOString();
         await this.env.DB.prepare(
-          `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at)
-           VALUES (?, ?, ?, ?, 'blocked', ?)
+          `INSERT INTO beats (campaign_id, tick, prose, situation, source, created_at, published_at)
+           VALUES (?, ?, ?, ?, 'blocked', ?, ?)
            ON CONFLICT(campaign_id, tick) DO NOTHING`,
         )
           .bind(
@@ -467,7 +498,8 @@ export class CampaignDO extends DurableObject<Env> {
               "cannot be true. Nothing was lost; the story simply did not move. " +
               "Everyone's submitted actions were cleared, so send them again when you like.",
             before.scene.situation,
-            new Date().toISOString(),
+            now,
+            now,
           )
           .run();
       } catch (err) {
@@ -481,6 +513,7 @@ export class CampaignDO extends DurableObject<Env> {
         eventCount: 0,
         drifted: [],
         reason,
+        held: false,
       };
     }
 
@@ -512,36 +545,197 @@ export class CampaignDO extends DurableObject<Env> {
     await this.#project(result.state, result.events, beat, meta);
     await this.#scheduleNextTick();
 
-    // A deadline tick has no HTTP caller, so the fan-out has to happen here.
-    // Detached: nobody should wait on N mail sends, and a bounce must not roll
-    // back a tick that already resolved.
-    this.ctx.waitUntil(
-      this.#fanOut(result.state, beat, result, meta).catch((err) => {
-        console.error("fan-out failed", err);
-      }),
-    );
-
-    return {
+    const summaryFields = {
       tick: result.state.tick,
       source: beat.source,
       eventCount: result.events.length,
       drifted: result.resolutions.filter((r) => r.action.auto).map((r) => r.action.playerId),
       reason,
     };
+
+    const windowMs = await this.#reviewWindowMs();
+    if (windowMs > 0) {
+      // Canon has advanced and the beat is written; only delivery waits.
+      this.#put("heldFanOut", {
+        tick: result.state.tick,
+        recaps: result.recaps,
+        autoBy: Object.fromEntries(
+          result.resolutions
+            .filter((r) => r.action.auto)
+            .map((r) => [r.action.characterId, r.action.intent]),
+        ),
+      });
+      await this.#openReviewWindow(result.state.tick, windowMs);
+      return { ...summaryFields, held: true };
+    }
+
+    // A deadline tick has no HTTP caller, so the fan-out has to happen here.
+    // Detached: nobody should wait on N mail sends, and a bounce must not roll
+    // back a tick that already resolved.
+    await this.#markPublished(result.state.tick);
+    this.ctx.waitUntil(
+      this.#fanOut(result.state, beat, result, meta).catch((err) => {
+        console.error("fan-out failed", err);
+      }),
+    );
+
+    return { ...summaryFields, held: false };
   }
 
+  /**
+   * How long to hold this campaign's next beat, from the D1 seat row.
+   *
+   * A read failure means "publish now". A blip in the read model must degrade
+   * to today's behavior, never leave a beat sitting unseen.
+   */
+  async #reviewWindowMs(): Promise<number> {
+    try {
+      const seat = await getSeat(this.env.DB, this.#world().campaignId);
+      if (!seat?.dmPlayerId) return 0;
+      return resolveWindowMs(this.#config().cadence, seat.reviewWindowMs);
+    } catch (err) {
+      console.error("seat lookup failed; publishing immediately", err);
+      return 0;
+    }
+  }
+
+  async #markPublished(tick: number): Promise<void> {
+    try {
+      await this.env.DB.prepare(
+        "UPDATE beats SET published_at = ? WHERE campaign_id = ? AND tick = ? AND published_at IS NULL",
+      )
+        .bind(new Date().toISOString(), this.#world().campaignId, tick)
+        .run();
+    } catch (err) {
+      await this.#recordProjectionFailure(this.#world().campaignId, tick, "publish", err);
+    }
+  }
+
+  /**
+   * Publish whatever is held: mark the beat visible, mail it, hand the alarm
+   * back to the tick clock.
+   *
+   * Idempotent by design — the review alarm, the DM's publish button, and the
+   * next tick's self-heal can all race to get here, and only one of them should
+   * result in mail going out. The guard below is safe against that race because
+   * the read of `phase` and the write that clears it are both synchronous
+   * SQLite calls with no `await` between them, so no second caller can observe
+   * `review` after the first has claimed it.
+   */
+  async publishHeldBeat(opts: { expired?: boolean } = {}): Promise<{
+    published: boolean;
+    tick: number | null;
+  }> {
+    const tick = this.#get<number>("heldTick");
+    if (this.#get<string>("phase") !== "review" || tick === null) {
+      return { published: false, tick: null };
+    }
+
+    // Clear the phase first. If mail throws we must not re-enter this method
+    // and send twice; the beat is already canon and already written.
+    this.#put("phase", "open");
+    this.#put("heldTick", null);
+    this.#put("windowClosesAt", null);
+
+    await this.#markPublished(tick);
+
+    const held = this.#get<{
+      tick: number;
+      recaps: Record<string, string[]>;
+      autoBy: Record<string, string>;
+    }>("heldFanOut");
+    this.#put("heldFanOut", null);
+
+    const state = this.#world();
+    const meta = this.#get<{ name: string; slug: string }>("meta") ?? { name: "Campaign", slug: "c" };
+    const row = await this.env.DB.prepare(
+      "SELECT prose, situation, source FROM beats WHERE campaign_id = ? AND tick = ?",
+    )
+      .bind(state.campaignId, tick)
+      .first<{ prose: string; situation: string; source: string }>();
+
+    if (row && held) {
+      // Read the prose back from D1 rather than from memory: the DM may have
+      // rewritten it during the window, and what publishes must be their
+      // version, not the one narration produced.
+      const beat = { prose: row.prose, situation: row.situation, source: row.source } as Beat;
+      const resolutions = Object.entries(held.autoBy).map(([characterId, intent]) => ({
+        action: { characterId, intent, auto: true } as PlayerAction,
+      }));
+      this.ctx.waitUntil(
+        this.#fanOut(state, beat, { resolutions, recaps: held.recaps }, meta).catch((err) => {
+          console.error("fan-out failed", err);
+        }),
+      );
+    }
+
+    if (opts.expired) await this.#countMissedWindow();
+    else await this.#resetMissedWindows();
+
+    await this.#armFor(this.#get<number>("nextDeadlineAt") ?? Date.now() + 60_000);
+    return { published: true, tick };
+  }
+
+  async reviewState(): Promise<{
+    phase: "open" | "review";
+    heldTick: number | null;
+    windowClosesAt: number | null;
+  }> {
+    return {
+      // An unset `phase` and an explicit `"open"` are the same state and must
+      // read as the same value; only `"review"` is distinguished.
+      phase: this.#get<string>("phase") === "review" ? "review" : "open",
+      heldTick: this.#get<number>("heldTick"),
+      windowClosesAt: this.#get<number>("windowClosesAt"),
+    };
+  }
+
+  // Deliberate no-ops. Task 7 (build node N5) replaces both with the real
+  // missed-window accounting that reverts the seat after three silent windows.
+  // Until then a window that expires costs the DM nothing, which is the
+  // behavior this task is specified to have — not an unfinished edit.
+  async #countMissedWindow(): Promise<void> {}
+  async #resetMissedWindows(): Promise<void> {}
+
+  /**
+   * Compute and store the next tick deadline, and arm the alarm for it.
+   *
+   * The deadline is absolute from the moment a tick resolves. A review window
+   * is carved out of the front of the next cycle rather than added to it, so
+   * however long the DM takes, the clock the group agreed to does not drift.
+   */
   async #scheduleNextTick(): Promise<void> {
     const config = this.#config();
     const at = Date.now() + CADENCE_MS[config.cadence];
+    this.#put("nextDeadlineAt", at);
+    await this.#armFor(at);
+  }
+
+  /** Point the single alarm at a moment, and mirror it to D1 for the countdown. */
+  async #armFor(at: number): Promise<void> {
     await this.ctx.storage.setAlarm(at);
-    this.#put("deadlineAt", at);
+    this.#put("deadlineAt", this.#get<number>("nextDeadlineAt") ?? at);
     try {
       await this.env.DB.prepare("UPDATE campaigns SET deadline_at = ?, tick = ? WHERE id = ?")
-        .bind(at, this.#world().tick, this.#world().campaignId)
+        .bind(this.#get<number>("nextDeadlineAt") ?? at, this.#world().tick, this.#world().campaignId)
         .run();
     } catch {
       /* the DO alarm is the real clock; D1 only mirrors it for display */
     }
+  }
+
+  /**
+   * Hold publication and arm the alarm for the window's end instead.
+   *
+   * `nextDeadlineAt` is already stored, so the alarm can be handed back to the
+   * tick clock the moment the beat publishes.
+   */
+  async #openReviewWindow(tick: number, windowMs: number): Promise<void> {
+    const closesAt = Date.now() + windowMs;
+    this.#put("phase", "review");
+    this.#put("heldTick", tick);
+    this.#put("windowClosesAt", closesAt);
+    await this.ctx.storage.setAlarm(closesAt);
   }
 
   /** Mail every member their beat, their prompt, and any recap they are owed. */
