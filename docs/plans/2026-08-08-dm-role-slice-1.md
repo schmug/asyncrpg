@@ -3019,11 +3019,34 @@ If the smoke script does not already create a second member for a campaign, reus
 
 - [ ] **Step 2: Run the smoke suite**
 
+Start a local worker on **8788**, which is the port `smoke:local` targets:
+
 ```bash
-node scripts/smoke.mjs http://localhost:8787
+npx wrangler dev --port 8788
+```
+
+Then, in another shell:
+
+```bash
+npm run smoke:local
 ```
 
 Expected: every check passes, pre-existing ones included.
+
+Three things about this script that a stale runbook line will get wrong:
+
+- **It derives its D1 target from the base URL's host**, not from a flag —
+  loopback means the local database, anything else means the deployed one. A
+  `--local`/`--remote` that contradicts the URL is fatal rather than a silent
+  winner. So a bare `node scripts/smoke.mjs http://localhost:8788` is safe now,
+  but `…:8787` will not reach a worker started by `smoke:local`'s conventions.
+- **`npm run smoke --local` does not work.** npm consumes `--local` as its own
+  config flag, and the script sees a no-argument run. It refuses to guess rather
+  than defaulting to production. Use `npm run smoke:local`, or
+  `npm run smoke -- --local`.
+- **`npm run smoke:prod` runs the full adversarial suite, its seeding, and its
+  cleanup DELETEs against the live game.** Do not reach for it to check a local
+  change.
 
 - [ ] **Step 3: Reword the promise in the README**
 

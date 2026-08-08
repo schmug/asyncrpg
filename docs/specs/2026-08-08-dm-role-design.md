@@ -324,9 +324,29 @@ router shape.
 | `POST` | `/dm/undo` | DM | reverse an op by id, using `prior_value` |
 | `POST` | `/dm/publish` | DM | publish now, collapsing the window |
 
-Rate-limited on the same mechanism as actions. Every one is 403 for a member
-who does not hold the seat and 404 for a non-member, matching existing
-behaviour.
+Rate-limited on the same mechanism as actions.
+
+> **Correction (2026-08-08):** this section originally said every endpoint is
+> "403 for a member who does not hold the seat and 404 for a non-member,
+> matching existing behaviour." Both halves were wrong. Existing behaviour for a
+> non-member is **403** (`"you are not in this campaign"`, `src/index.ts:500`),
+> not 404 — and the
+> implementation deliberately returns a **uniform 403** to everyone who is not
+> the sitting DM, so that a non-member and a seatless member receive identical
+> refusals and neither response becomes an oracle for who is in a campaign.
+> `src/index.ts:362-366`. The seat check runs *ahead* of the general membership
+> check for exactly this reason. A forged campaign slug is still 404, because
+> the campaign lookup fails before any of this (`src/index.ts:291`).
+>
+> Of the nine endpoints above, five are built: `POST /dm`, `PATCH /dm/window`,
+> `GET /dm/review`, `PATCH /dm/beat`, `POST /dm/publish`. The other four —
+> `/dm/renarrate`, `/dm/ops`, `/dm/propose`, `/dm/undo` — belong to slices 2 and
+> 3 and do not exist. This table is a design surface, not an inventory.
+>
+> `GET /dm/review` is also narrower than described here. It returns the latest
+> beat (prose, situation, source, `original_prose`, `revised_by`, whether it is
+> held), the phase, and the window's close time — not "the tick's events" and not
+> "the current edit log", which needs the `dm_edits` table slice 2 introduces.
 
 ## 9. Failure posture
 

@@ -81,6 +81,27 @@ web/PWA  ──► Worker fetch()  ─┘   DO SQLite = canonical world state
                     7. fan out                 email + web
 ```
 
+> **Implementation note (2026-08-08):** steps 4 and 5 above are the design as
+> first written, and §2's implementation note already supersedes them: there is
+> **no delta channel**, so there is nothing to validate. What shipped is:
+>
+> ```
+>                     4. LLM narrate             events + state → prose + one
+>                                                bounded scene line, and nothing
+>                                                that is written to world state
+>                     5. project → D1            the queryable chronicle
+>                     6. hold for review         only if the campaign has a DM
+>                     7. fan out                 email + web
+> ```
+>
+> The narrator's schema is exactly `{ prose, situation }`; output that is empty,
+> mangled, or over budget falls through to deterministic templated prose built
+> from the same events, so a tick always resolves. Step 6 is the human DM
+> review window added by
+> [`2026-08-08-dm-role-design.md`](./2026-08-08-dm-role-design.md); it moves
+> nothing, because canon has already advanced and the beat is already written by
+> the time it runs. Campaigns with no DM skip it entirely.
+
 ### Storage split
 
 | Store | Holds | Why |
@@ -252,7 +273,7 @@ character histories, world map summary. This is the shareable artifact.
 
 | Failure | Behavior |
 |---|---|
-| LLM emits invalid delta | retry once with the validation error appended; then fall back to templated prose generated directly from sim events |
+| LLM emits invalid delta | ~~retry once with the validation error appended; then fall back to templated prose generated directly from sim events~~ — **cannot happen: there is no delta channel** (see §2). The equivalent live failure is unusable *prose*, which falls straight through to the templated path below |
 | LLM unreachable / budget exceeded | same templated fallback; tick still advances |
 | Email send fails | retried; the beat remains readable on the web |
 | DO alarm fails | platform retries alarms |

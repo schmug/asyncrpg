@@ -26,9 +26,9 @@ thing engagement buys, and it buys nothing mechanical. See the spec for why that
 line is drawn where it is.
 
 Today the second paragraph describes the design, not shipped behaviour: **no DM
-can change world state yet.** The seat that ships now reaches prose and timing
-only, so every campaign currently gets the promise absolutely. The typed canon
-ops that would make a DM's authority real are specified in
+can change world state yet.** The seat that ships reaches prose, timing, and the
+seat itself, so every campaign currently gets the promise absolutely. The typed
+canon ops that would make a DM's authority real are specified in
 [`docs/specs/2026-08-08-dm-role-design.md`](docs/specs/2026-08-08-dm-role-design.md)
 and are not built.
 
@@ -44,9 +44,13 @@ escalate, settlements prosper and revolt, NPCs remember exactly how you treated
 them. All of it advances whether or not anyone shows up.
 
 The model does two schema-bounded jobs: turn what you typed into a typed
-action, and turn resolved events into prose. Any state change it proposes is
-validated against the sim's rules and **rejected if illegal**. It cannot invent
-a faction, resurrect a dead NPC, or move your party across the map.
+action, and turn resolved events into prose. It proposes no state changes at
+all, because there is no channel on which to propose one. Intent parsing is the
+only path by which model output reaches state, and it is doubly bounded: the
+verb must be in a fixed enum, and the target must resolve to an entity that
+already exists. A model that invents "the Duke of Nowhere" produces an action
+with no target, never a new entity. It cannot invent a faction, resurrect a
+dead NPC, or move your party across the map.
 
 That constraint is what buys coherence over months of play. The baron your
 party snubbed in tick 3 is a row with a grudge value, not a sentence in a
@@ -84,19 +88,26 @@ web/PWA  ──► Worker fetch()  ─┘   DO SQLite = canonical world state
                     1. sim drift            deterministic world advance → events
                     2. player actions       seeded dice vs sim rules → events
                     3. absence policy       auto-act │ offscreen
-                    4. LLM narrate          events + state → prose + deltas
-                    5. validate deltas      illegal → reject → templated fallback
-                    6. project → D1         the queryable chronicle
-                    7. hold for review      only if the campaign has a DM
-                    8. fan out              email + web
+                    4. LLM narrate          events + state → prose + one scene
+                                            line, and nothing else — there is no
+                                            channel by which narration writes state
+                    5. project → D1         the queryable chronicle
+                    6. hold for review      only if the campaign has a DM
+                    7. fan out              email + web
 ```
+
+There is no delta channel to validate, because there is none to propose on.
+The narrator is asked for exactly two strings — the beat's prose and a bounded
+one-line scene description — and neither is ever written to world state. Output
+that is empty, mangled, or over budget falls through to templated prose
+generated directly from the same simulation events, so a tick always resolves.
 
 A tick resolves when **quorum acts or the deadline elapses**, whichever comes
 first — so an eager group moves fast and a slow group still moves. Quorum
 excludes offscreen players, or a half-dormant group could never reach it, and
 quorum reached during a review window does not resolve the next turn early.
 
-Step 7 moves nothing: canon has already advanced and the beat is already written
+Step 6 moves nothing: canon has already advanced and the beat is already written
 by the time it runs, so only delivery waits. Campaigns with no DM skip it.
 
 | Store | Holds |
@@ -125,7 +136,13 @@ npm test           # vitest against real Durable Objects and D1
 npm run typecheck  # tsc over src/test and scripts separately
 npm run sim:soak   # 500 deterministic ticks + invariant + replay checks
 npm run dev        # local worker
+npm run smoke:local  # HTTP smoke against a local worker + local D1
 ```
+
+`smoke:local` targets `http://localhost:8788`, so start the worker on that port
+(`npx wrangler dev --port 8788`). The suite refuses to guess a target: it picks
+its D1 database from the base URL's host, and `npm run smoke --local` does not
+work because npm eats the flag before the script sees it.
 
 ## Playing
 
@@ -186,6 +203,11 @@ A window of **0** is a first-class setting, not a degenerate one: it reproduces
 today's timing and fan-out exactly, for a group that wants a DM without any
 latency.
 
+When a window opens the DM is emailed the held beat, a link to it, and the time
+it publishes on its own. That mail is best-effort by design: the window closes
+on its alarm whether or not it was delivered, so a bounce costs a notification
+and never a turn.
+
 Within the window the DM reads the held beat and can rewrite its prose, or
 publish immediately. Doing nothing is also fine — when the window expires the
 beat publishes as written. Publication is idempotent, and a held beat is
@@ -193,26 +215,72 @@ published by the next tick's resolution before anything else happens, so no
 combination of a lost alarm, a duplicated publish, or a silent DM can leave a
 resolved beat unseen or mail it twice.
 
+### The seat reverts if nobody is sitting in it
+
+Three consecutive windows that expire untouched hand the seat back to the host.
+Going quiet costs the DM nothing else — it just moves the chair to someone who
+is there, which is the same principle the absence policy applies to players.
+
+"Untouched" is narrow and deliberate. Rewriting the beat breaks the streak, and
+so does publishing early; only a window that ran out its clock with no edit
+counts against the seat. A seat vacated mid-window is not charged for the
+silence, and a reverted host starts from a clean slate — the count is zeroed and
+the window returns to the cadence default, exactly as it would for any other
+incoming DM.
+
+### The DM's controls
+
+Five endpoints, all under `/api/campaigns/:slug`:
+
+| Method | Path | Who | Does |
+|---|---|---|---|
+| `POST` | `/dm` | host or DM | assign the seat, or vacate it with `{ playerId: null }` |
+| `GET` | `/dm/review` | DM | the latest beat, whether it is held, and when the window closes |
+| `PATCH` | `/dm/beat` | DM | rewrite prose; keeps `original_prose`, records `revised_by` |
+| `POST` | `/dm/publish` | DM | publish now, collapsing the window |
+| `PATCH` | `/dm/window` | DM | set the window, clamped to the cadence cap and told when clamped |
+
+Everything under `/dm/` answers a uniform **403** to anyone who is not the
+sitting DM. A non-member and a member without the seat get the identical
+refusal, so neither response becomes an oracle for who is in a campaign.
+
+### In the app
+
+The campaign view carries a DM panel, and it shows two different things to two
+different people. The sitting DM gets the review desk: the held beat in an
+editable box, when it publishes on its own, **Save changes**, and **Send it to
+the group**. A host who is not the DM gets only the seat control, so a campaign
+can never end up with a DM nobody can replace. Everyone else sees no panel at
+all — and has no held prose in their response to begin with, because the server
+filters it out before the page ever runs.
+
+Handing the seat over is a dropdown of the cast plus "Nobody — publish turns
+immediately", which is the vacate path rather than a separate control.
+
+The window length is not settable in the app yet; it is `PATCH /dm/window` only.
+
 ### What a DM cannot do yet
 
-**A DM cannot change world state.** What ships today reaches prose and timing
-only. The typed canon ops (`npc.set`, `faction.set`, `chronicle.add`, and the
-rest), the undo log, and the plain-English front door that proposes ops for
-confirmation are all specified in
+**A DM cannot change world state.** What ships today reaches prose, timing, and
+the seat itself. The typed canon ops (`npc.set`, `faction.set`, `chronicle.add`,
+and the rest), the undo log, and the plain-English front door that proposes ops
+for confirmation are all specified in
 [`docs/specs/2026-08-08-dm-role-design.md`](docs/specs/2026-08-08-dm-role-design.md)
 §5 and §6 — and none of them are built. Until they are, the simulation remains
 the only thing that writes canon, and the absence promise above holds
 absolutely for every campaign.
-
-Also specified and not yet built: reverting the seat to the host after three
-consecutive review windows expire untouched. Today an expired window costs the
-DM nothing.
 
 ## Status
 
 Deployed at [play.cortech.online](https://play.cortech.online) and playable end
 to end. A public demo chronicle lives at
 [/c/demo](https://play.cortech.online/c/demo).
+
+**The DM seat is newer than that deployment.** It is merged and tested on a
+feature branch and is not on `main`, so read [The DM seat](#the-dm-seat) as
+branch behaviour — verified against the code and the local gates — unless you
+have checked the live deployment yourself. The gate table below distinguishes
+what was actually run from what was only counted.
 
 Development is gated by an independent third-party critic (`codex`, fresh
 context, read-only sandbox) that scores five rubric categories against a clean
@@ -221,11 +289,25 @@ on two consecutive cycles.
 
 | Gate | What it proves |
 |---|---|
-| `npm test` | 264 tests, including the absence promise, the world invariants, and the DM seat and review window |
+| `npm test` | 362 tests across 15 files, including the absence promise, the world invariants, and the DM seat, review window, and seat reversion |
+| `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | 1500 deterministic ticks, invariants held on every one, replay identical, an absent player unpenalised, economy and state size bounded |
-| `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
-| `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
-| `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |
+| `scripts/smoke.mjs` | 77 assertions against a served target, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 59 assertions driving the real app at a mobile viewport, service workers blocked |
+| `scripts/email-e2e.mjs` | 23 assertions including a full round trip through real Cloudflare Email Routing |
+
+The first three rows were run against this revision. The last three were not:
+each needs a served target, and the email suite needs real Cloudflare Email
+Routing besides. Their numbers are **assertion call sites counted in the scripts
+themselves**, not the totals a run prints —
+
+```bash
+grep -cE '^[[:space:]]*(await )?check\(' scripts/smoke.mjs scripts/ui-smoke.mjs scripts/email-e2e.mjs
+```
+
+— and a run reports a slightly higher number, because a few of those sites
+execute inside loops. Treat them as the shape of the coverage, not as a passing
+score.
 
 The email test is a genuine loop, not a simulation of one: the game mails a
 beat to a reserved address on a **second** onboarded zone, Cloudflare delivers
