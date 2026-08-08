@@ -147,6 +147,68 @@ describe("blurbs", () => {
     }
   });
 
+  it("describes nothing at all from an empty row, for every kind", () => {
+    // The shape a half-written or pre-migration `entities.data` takes: it
+    // parses, it is an object, it carries nothing. Every kind must decline,
+    // because the alternative is not a thinner blurb — it is a fabricated one.
+    const empty = world();
+    const cases = [
+      ["factions", "faction"],
+      ["npcs", "npc"],
+      ["settlements", "settlement"],
+      ["regions", "region"],
+      ["threats", "threat"],
+    ] as const;
+    for (const [bucket, kind] of cases) {
+      const id = `${kind}_empty`;
+      loose(empty)[bucket]![id] = {};
+      expect(blurbFor(kind, id, empty), kind).toBe("");
+    }
+  });
+
+  it("does not read a missing `alive` as dead", () => {
+    // `!n.alive` is true for `undefined`, and "· died" is the single most
+    // consequential claim this line can make about a person.
+    const partial = world();
+    loose(partial).npcs!.npc_partial = {
+      id: "npc_partial",
+      name: "Halden Vrey",
+      role: "steward",
+      factionId: "fac_0",
+      locationId: "stl_0",
+    };
+    expect(blurbFor("npc", "npc_partial", partial)).toBe("");
+  });
+
+  it("does not read a missing population as a hamlet", () => {
+    // `sizeLabel` bands from the bottom, so an absent number falls through
+    // every threshold and reports the smallest settlement there is.
+    const partial = world();
+    loose(partial).settlements!.stl_partial = {
+      id: "stl_partial",
+      name: "Elsewhere",
+      regionId: "rgn_0",
+    };
+    expect(blurbFor("settlement", "stl_partial", partial)).toBe("");
+  });
+
+  it("does not read a missing danger as quiet", () => {
+    // Same failure as `population`, and this one defaults to the reassuring
+    // answer: a region nobody has scored reads as safe.
+    const partial = world();
+    loose(partial).regions!.rgn_partial = { id: "rgn_partial", name: "Nowhere", terrain: "moor" };
+    expect(blurbFor("region", "rgn_partial", partial)).toBe("");
+  });
+
+  it("still reports a genuine zero rather than treating it as absent", () => {
+    // The guards test for presence, not truthiness: a real 0 is a real band.
+    const zeroed = world();
+    zeroed.settlements.stl_0!.population = 0;
+    zeroed.regions.rgn_0!.danger = 0;
+    expect(blurbFor("settlement", "stl_0", zeroed)).toBe("a hamlet in Thornreach");
+    expect(blurbFor("region", "rgn_0", zeroed)).toBe("forest · quiet");
+  });
+
   it("returns an empty string for a threat row with no recognisable kind", () => {
     // A row read back from `entities.data` can parse and still not be a Threat.
     const malformed = world();

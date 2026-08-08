@@ -238,6 +238,26 @@ beforeEach(async () => {
     }),
   );
 
+  // A revealed threat, fully populated. `severity` is on the disclosure list
+  // and *only* threats carry it, so without this row the one kind that could
+  // leak it is the one kind never loaded.
+  await seedEntity(
+    PUBLIC_ID,
+    "thr_0",
+    "threat",
+    "the Grey Blight",
+    JSON.stringify({
+      id: "thr_0",
+      name: "the Grey Blight",
+      kind: "blight",
+      regionId: "rgn_0",
+      severity: 66,
+      growthRate: 2,
+      revealed: true,
+      resolved: false,
+    }),
+  );
+
   // The private campaign's row is deliberately `'{}'` — a half-written or
   // pre-migration projection is the shape a renderer actually meets.
   await seedEntity(PRIVATE_ID, "fac_0", "faction", "Secret Order", "{}");
@@ -275,6 +295,15 @@ describe("dossier page — identity", () => {
     expect(html).toContain("&lt;script&gt;alert(1)&lt;/script&gt;");
   });
 
+  it("routes a threat id and describes it without its severity", async () => {
+    const res = await get("/c/pub/who/thr_0");
+    expect(res.status).toBe(200);
+    const html = await res.text();
+    expect(html).toContain("the Grey Blight");
+    expect(html).toContain(`<p class="sub">A trouble · a blight in Thornreach</p>`);
+    expect(withoutStyle(html)).not.toContain("66");
+  });
+
   it("links back to the chronicle", async () => {
     expect(await body("/c/pub/who/fac_0")).toContain(`href="/c/pub"`);
   });
@@ -282,7 +311,9 @@ describe("dossier page — identity", () => {
 
 describe("dossier page — disclosure", () => {
   it("discloses no agenda, relation, or raw 0-100 field on any kind's page", async () => {
-    for (const id of ["fac_0", "stl_0", "rgn_0", "npc_0"]) {
+    // All five routable kinds. `thr_0` earns its place twice over: `severity`
+    // is on the term list and no other kind carries it.
+    for (const id of ["fac_0", "stl_0", "rgn_0", "npc_0", "thr_0"]) {
       const html = await body(`/c/pub/who/${id}`);
       expect(html, id).not.toMatch(DISCLOSURE);
     }
@@ -391,6 +422,34 @@ describe("dossier page — what the chronicle records", () => {
 });
 
 describe("dossier page — malformed rows", () => {
+  it("omits the subtitle for an empty row of every kind, inventing nothing", async () => {
+    // One kind passing is not evidence for the others: `faction` happens to be
+    // the only kind that declines an empty row naturally. `npc` read a missing
+    // `alive` as dead and `settlement` read a missing `population` as "a
+    // hamlet" — in-fiction facts fabricated out of a gap in a projected row,
+    // on the one page a reader opens to find out what is true.
+    const cases = [
+      ["fac_e", "faction", "The Hollow Chapter", "A faction"],
+      ["npc_e", "npc", "Halden Vrey", "A person"],
+      ["stl_e", "settlement", "Elsewhere", "A place"],
+      ["rgn_e", "region", "Nowhere", "A land"],
+      ["thr_e", "threat", "the Nameless", "A trouble"],
+    ] as const;
+
+    for (const [id, kind, name, label] of cases) {
+      await seedEntity(PUBLIC_ID, id, kind, name, "{}");
+      const res = await get(`/c/pub/who/${id}`);
+      expect(res.status, id).toBe(200);
+      const html = await res.text();
+      expect(html, id).toContain(`<h1>${name}</h1><p class="sub">${label}</p>`);
+      expect(html, id).not.toContain("undefined");
+      expect(html, id).not.toMatch(/\bdied\b|\ba hamlet\b|\bquiet\b|\babandoned\b/);
+      // The identity block degrades; the rest of the page does not.
+      expect(html, id).toContain("What the chronicle records");
+      expect(html, id).toContain("Back to the chronicle");
+    }
+  });
+
   it("renders a usable page for a row whose data is an empty object", async () => {
     // Spec §10: an empty blurb means *omit the subtitle*, not render an empty
     // element and never the string "undefined".

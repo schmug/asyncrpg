@@ -116,8 +116,14 @@ const BUCKET: Record<string, string> = {
  *
  * `entities.data` is a TEXT column: it can be half-written, pre-migration, or
  * simply not JSON. Anything that is not a plain object is treated as an absent
- * row, which costs the blurb and nothing else — `blurbFor` is total against a
- * missing id.
+ * row.
+ *
+ * A row that *does* parse but carries nothing is the more dangerous case, and
+ * it is handled upstream: `blurbFor` declines to describe a row whose absent
+ * fields would otherwise become claims — an NPC with no `alive` is not dead, a
+ * settlement with no `population` is not a hamlet. Either way the cost is the
+ * subtitle and nothing else: the name, the timeline, and the way back all
+ * still render.
  */
 function place(state: WorldState, row: EntityRow): Record<string, unknown> | null {
   const bucket = BUCKET[row.kind];
