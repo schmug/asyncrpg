@@ -26,9 +26,17 @@ export function escapeHtml(value: string): string {
  * A faint underline reads as *reference*; a coloured link reads as *call to
  * action*, and the only call to action in a beat is "reply". The accent
  * "Read the chronicle" link stays the one loud link in the message.
+ *
+ * The colour is restated here rather than inherited from the wrapping `<div>`,
+ * even though it is the same value. Outlook desktop renders mail through Word,
+ * which ignores `color:inherit` — mention anchors would fall back to default
+ * hyperlink blue there, up to eight of them, which is precisely the
+ * link-density look the cap of `MAX_MENTIONS` exists to avoid. The two
+ * `text-decoration-*` properties are unsupported by Word as well, but they
+ * degrade to a plain underline, which is the intended effect anyway.
  */
 const LINK_STYLE =
-  "color:inherit;text-decoration:underline;text-decoration-color:#c9b9a5;text-underline-offset:2px";
+  "color:#1c1a17;text-decoration:underline;text-decoration-color:#c9b9a5;text-underline-offset:2px";
 
 /**
  * Escape each segment on its own, then join.
@@ -50,11 +58,14 @@ function renderSegments(segments: Segment[], slug: string, origin: string): stri
 /**
  * Assemble the linked body first, split it into paragraphs after.
  *
- * That order is safe because an anchor never contains a newline: the tag is
- * built from one segment's escaped value, and `scanProse` matches within the
- * prose without spanning a blank line, so a `\n{2,}` split can never land
- * inside `<a …>…</a>`. Doing it the other way round — splitting first — would
- * mean re-deriving segment offsets per paragraph for no gain.
+ * That order is safe only because an anchor can never contain a newline, and
+ * that is a guarantee this module does not establish for itself: `candidates()`
+ * in `src/lore/mentions.ts` refuses to make a name containing a line break
+ * linkable (see `LINE_BREAK` there), so no mention segment can span a `\n{2,}`
+ * boundary. Without that rule an entity named "Ashen\n\nCoil" splits into
+ * `<p>Then <a …>Ashen</p><p>Coil</a> arrived.</p>` — the value is still
+ * escaped, but the nesting is broken. If that rule is ever relaxed, this
+ * function has to split first and re-derive segment offsets per paragraph.
  *
  * `segments` is null when the caller supplied no scan, and empty when the scan
  * found nothing to split (empty prose). Both fall back to escaping `text`

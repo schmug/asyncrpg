@@ -13,23 +13,63 @@
  */
 
 import { env as runtimeEnv } from "cloudflare:workers";
-import { beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { EmailSendMessage, Env } from "../../src/env";
 import { sendBeat, type BeatMail } from "../../src/email/outbound";
 import { scanProse, type MentionScan } from "../../src/lore/mentions";
 import { world } from "../lore/fixtures";
 
+/**
+ * `scanProse` is pure, so "how many times was it called" is invisible in its
+ * output — a spy is the only seam that can see it, and `#fanOut`'s scan-once
+ * property is otherwise asserted nowhere.
+ *
+ * The spy wraps the *real* implementation, so every other test in this file
+ * still exercises production behaviour; only a call count is added.
+ */
+vi.mock("../../src/lore/mentions", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../../src/lore/mentions")>();
+  return { ...actual, scanProse: vi.fn(actual.scanProse) };
+});
+
 const runtime = runtimeEnv as unknown as Env;
 
-// Column-for-column with `migrations/0001_init.sql:115`, FK constraints
-// dropped as the rest of this repo's test schemas already do. The UNIQUE index
-// on `message_id` is deliberately not recreated; the send stub below hands back
-// a distinct id per call instead, which is both closer to reality and keeps a
-// multi-send test from silently losing its second insert.
+// Column-for-column with `migrations/0001_init.sql`, FK constraints dropped as
+// the rest of this repo's test schemas already do. The UNIQUE index on
+// `reply_bindings.message_id` is deliberately not recreated; the send stub
+// below hands back a distinct id per call instead, which is both closer to
+// reality and keeps a multi-send test from silently losing its second insert.
+//
+// Everything below `reply_bindings` is for the fan-out test at the end of this
+// file, which drives a real `CampaignDO` through a real tick. That path writes
+// `events`/`entities`/`beats` and reads `memberships`/`players`, all with
+// swallowed failures — so an undeclared table there would not fail a test, it
+// would quietly stop covering the write while printing plausible-looking
+// "projection failed" noise.
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS reply_bindings (code TEXT PRIMARY KEY, message_id TEXT NOT NULL,
   campaign_id TEXT NOT NULL, player_id TEXT NOT NULL, tick INTEGER NOT NULL,
   expires_at INTEGER NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS players (id TEXT PRIMARY KEY, email TEXT NOT NULL UNIQUE,
+  display_name TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS memberships (campaign_id TEXT NOT NULL, player_id TEXT NOT NULL,
+  character_id TEXT NOT NULL, character_name TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'player',
+  joined_at TEXT NOT NULL, PRIMARY KEY (campaign_id, player_id));
+CREATE TABLE IF NOT EXISTS campaigns (id TEXT PRIMARY KEY, slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL, cadence TEXT NOT NULL, quorum_fraction REAL NOT NULL DEFAULT 0.5,
+  tick INTEGER NOT NULL DEFAULT 0, deadline_at INTEGER, public_chronicle INTEGER NOT NULL DEFAULT 1,
+  created_by TEXT NOT NULL, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS entities (campaign_id TEXT NOT NULL, entity_id TEXT NOT NULL,
+  kind TEXT NOT NULL, name TEXT NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+  PRIMARY KEY (campaign_id, entity_id));
+CREATE TABLE IF NOT EXISTS events (campaign_id TEXT NOT NULL, event_id TEXT NOT NULL,
+  tick INTEGER NOT NULL, kind TEXT NOT NULL, actor_id TEXT, region_id TEXT,
+  summary TEXT NOT NULL, significance INTEGER NOT NULL, data TEXT NOT NULL DEFAULT '{}',
+  target_ids TEXT NOT NULL DEFAULT '[]', created_at TEXT NOT NULL,
+  PRIMARY KEY (campaign_id, event_id));
+CREATE TABLE IF NOT EXISTS beats (campaign_id TEXT NOT NULL, tick INTEGER NOT NULL,
+  prose TEXT NOT NULL, situation TEXT NOT NULL DEFAULT '', source TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL, PRIMARY KEY (campaign_id, tick));
 `;
 
 const CAMPAIGN = "cmp_1";
@@ -73,6 +113,22 @@ function parts(index = 0): { text: string; html: string } {
   return { text: message.text, html: message.html ?? "" };
 }
 
+/**
+ * True when an `<a>` is opened inside one paragraph and closed inside another.
+ *
+ * Walks the tag stream rather than parsing: any paragraph boundary seen while
+ * an anchor is open is a straddle.
+ */
+function anchorStraddlesParagraph(html: string): boolean {
+  let open = false;
+  for (const token of html.match(/<a\s[^>]*>|<\/a>|<\/p>|<p[\s>]/g) ?? []) {
+    if (token.startsWith("<a")) open = true;
+    else if (token === "</a>") open = false;
+    else if (open) return true;
+  }
+  return false;
+}
+
 // File-level, outside every `describe`, so any one test can be run alone with
 // `-t` and still find its tables.
 beforeAll(async () => {
@@ -108,15 +164,20 @@ describe("beat mail — linked mentions", () => {
     expect(body).toContain("Vresford wept.");
   });
 
-  it("uses the quiet reference style and never a display/href mismatch", async () => {
+  it("uses the quiet reference style, and every href points at PUBLIC_ORIGIN", async () => {
     const prose = "The Ashen Coil sent word to Vresford.";
     await sendBeat(env, beat({ prose, scan: scanProse(prose, world()) }));
     const { html } = parts();
 
+    // The colour is stated explicitly rather than inherited: Outlook desktop's
+    // Word rendering engine ignores `color:inherit` and would fall back to
+    // default hyperlink blue on all eight mentions — exactly the link-density
+    // look the cap of 8 exists to avoid.
     expect(html).toContain(
-      "color:inherit;text-decoration:underline;" +
+      "color:#1c1a17;text-decoration:underline;" +
         "text-decoration-color:#c9b9a5;text-underline-offset:2px",
     );
+    expect(html).not.toContain("color:inherit");
 
     // Deliverability: every href in the message points at PUBLIC_ORIGIN, and
     // every dossier anchor's visible text is the entity name, not a URL.
@@ -131,6 +192,32 @@ describe("beat mail — linked mentions", () => {
     for (const label of labels) {
       expect(["The Ashen Coil", "Vresford"]).toContain(label);
     }
+  });
+
+  it("anchors the prose's own casing while the who's-who uses the canonical name", async () => {
+    // Deliberate, and the one place anchor text is not the canonical name:
+    // `scanProse` slices the matched span out of the prose so the sentence
+    // still reads. A reader seeing "word came from vresford" must not find
+    // "Vresford" spliced mid-sentence. It is still not a display/href
+    // mismatch — the label is the same entity, differing only in case, and the
+    // who's-who block below carries the canonical spelling.
+    const prose = "word came from vresford at dusk.";
+    const scan = scanProse(prose, world());
+    expect(scan.mentions.map((m) => m.name)).toEqual(["Vresford"]);
+
+    await sendBeat(env, beat({ prose, scan }));
+    const { text, html } = parts();
+
+    const body = html.slice(0, html.indexOf("<hr"));
+    expect(body).toContain(">vresford</a>");
+    expect(body).not.toContain(">Vresford</a>");
+
+    const listHtml = html.slice(html.indexOf("Who's who in this turn"));
+    expect(listHtml).toContain(">Vresford</a>");
+    expect(text).toContain("  · Vresford — a town in Thornreach");
+
+    // Same entity, same destination, whichever casing was rendered.
+    expect(html.match(new RegExp(`href="${ORIGIN}/c/demo/who/stl_0"`, "g"))).toHaveLength(2);
   });
 
   it("preserves paragraph breaks around links", async () => {
@@ -148,6 +235,42 @@ describe("beat mail — linked mentions", () => {
     const { html } = parts();
     expect(html.match(/<p style="margin:0 0 1em">/g)).toHaveLength(1);
     expect(html).toContain("<br>");
+  });
+
+  it("never opens an anchor in one paragraph and closes it in the next", async () => {
+    // The renderer assembles linked HTML first and splits it into paragraphs
+    // on `\n{2,}` afterwards. That is only sound because an anchor can never
+    // contain a newline — a guarantee enforced in `candidates()`, which
+    // refuses to make a name with a line break linkable at all. Without it an
+    // entity named "Ashen\n\nCoil" really does produce
+    // `<p>Then <a …>Ashen</p><p>Coil</a> arrived.</p>`.
+    for (const name of ["Ashen\n\nCoil", "Ashen\nCoil"]) {
+      const broken = world();
+      broken.factions.fac_0!.name = name;
+      const prose = `Then ${name} arrived.`;
+      sent.length = 0;
+      await sendBeat(env, beat({ prose, scan: scanProse(prose, broken) }));
+      const { html } = parts();
+      expect(anchorStraddlesParagraph(html)).toBe(false);
+      // The prose still renders in full; only the link is withheld.
+      expect(html).toContain("arrived.");
+      expect(html).not.toContain("/who/fac_0");
+    }
+  });
+
+  it("has a straddle probe that actually detects a straddle", () => {
+    // Guards the test above from passing vacuously: the probe must report true
+    // for the exact shape the guarantee exists to prevent.
+    expect(
+      anchorStraddlesParagraph(
+        `<p style="margin:0 0 1em">Then <a href="x">Ashen</p>\n<p style="margin:0 0 1em">Coil</a> arrived.</p>`,
+      ),
+    ).toBe(true);
+    expect(
+      anchorStraddlesParagraph(
+        `<p style="margin:0 0 1em">Then <a href="x">Ashen Coil</a> arrived.</p>`,
+      ),
+    ).toBe(false);
   });
 });
 
@@ -364,4 +487,87 @@ describe("beat mail — existing send behaviour is untouched", () => {
     expect(result).not.toBeNull();
     expect(parts().html).toContain("/who/fac_0");
   });
+});
+
+/**
+ * The tick scans once, not once per player.
+ *
+ * `#fanOut` builds the scan above its member loop because every member gets
+ * the same prose. That was a comment and nothing else — a refactor sliding the
+ * call inside the loop would ship green, quietly turning one pure pass into
+ * one per player on the campaign's hottest path.
+ *
+ * Nothing short of a real `CampaignDO` covers it: the property lives in the
+ * placement of one statement inside a private method, and `scanProse` is pure,
+ * so its output cannot betray how often it ran. This drives `init` -> `join`
+ * -> `resolveTick` -> `#fanOut` -> `sendBeat` for real, against real D1
+ * membership rows and miniflare's `send_email` binding.
+ */
+describe("beat mail — the tick scans once per tick, not once per player", () => {
+  const FANOUT_CAMPAIGN = "cmp_fanout_scan_once";
+  const MEMBERS = 4;
+
+  it(
+    "runs scanProse exactly once while mailing every member",
+    { timeout: 30_000 },
+    async () => {
+      const stub = runtime.CAMPAIGN.get(runtime.CAMPAIGN.idFromName(FANOUT_CAMPAIGN));
+      await stub.init({
+        campaignId: FANOUT_CAMPAIGN,
+        slug: "fanout",
+        name: "Fanout",
+        cadence: "weekly",
+        // Only the roster is needed, not a deep pre-play history.
+        historyYears: 1,
+      });
+
+      const joinedAt = new Date().toISOString();
+      for (let i = 1; i <= MEMBERS; i++) {
+        const playerId = `plr_fan_${i}`;
+        const joined = await stub.join(playerId, `Tester ${i}`, "scout");
+        // `join` writes the character into the DO's world; `#fanOut` reads the
+        // roster from D1, so the membership rows have to exist there too.
+        await runtime.DB.prepare(
+          "INSERT OR REPLACE INTO players (id, email, display_name, created_at) VALUES (?, ?, ?, ?)",
+        )
+          .bind(playerId, `fan${i}@example.test`, `Tester ${i}`, joinedAt)
+          .run();
+        await runtime.DB.prepare(
+          `INSERT OR REPLACE INTO memberships
+             (campaign_id, player_id, character_id, character_name, role, joined_at)
+           VALUES (?, ?, ?, ?, 'player', ?)`,
+        )
+          .bind(FANOUT_CAMPAIGN, playerId, joined.characterId, joined.characterName, joinedAt)
+          .run();
+      }
+
+      // Count only what the tick does, not what the rest of this file did.
+      vi.mocked(scanProse).mockClear();
+      await stub.resolveTick("deadline");
+
+      // `#fanOut` is detached through `ctx.waitUntil`, so `resolveTick`
+      // returning does not mean the mail has gone out. One `reply_bindings`
+      // row is written per successful send, so that count is the loop's
+      // iteration count observed from outside.
+      const deadline = Date.now() + 20_000;
+      let mailed = 0;
+      while (Date.now() < deadline) {
+        const row = await runtime.DB.prepare(
+          "SELECT COUNT(*) AS n FROM reply_bindings WHERE campaign_id = ?",
+        )
+          .bind(FANOUT_CAMPAIGN)
+          .first<{ n: number }>();
+        mailed = row?.n ?? 0;
+        if (mailed >= MEMBERS) break;
+        await new Promise((resolve) => setTimeout(resolve, 100));
+      }
+
+      // Both halves matter. Without the first, "one call" would also be true
+      // of a fan-out that mailed nobody; without the second, the property
+      // under test is not asserted at all. A call moved inside the loop makes
+      // this 4.
+      expect(mailed).toBe(MEMBERS);
+      expect(vi.mocked(scanProse).mock.calls).toHaveLength(1);
+    },
+  );
 });
