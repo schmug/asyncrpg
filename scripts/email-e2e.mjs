@@ -46,6 +46,18 @@ function check(name, ok, detail = "") {
   console.log(`  [${ok ? "PASS" : "FAIL"}] ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
+/**
+ * A local dev server is backed by the local D1, not the deployed one.
+ *
+ * The flag has to follow the target or the run is worse than broken: the
+ * sessions are seeded in the remote database and the cookie is then handed to
+ * `wrangler dev`, where it authenticates nobody — while the rows, and the
+ * cleanup's DELETEs, land in production. Note that the two real mail hops need
+ * the deployed Worker regardless; against a local base this proves only the
+ * part a local Worker can prove.
+ */
+const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE);
+
 const sha256 = (v) => createHash("sha256").update(v).digest("hex");
 const esc = (v) => String(v).replace(/'/g, "''");
 
@@ -53,7 +65,16 @@ function run(cmd, args) {
   return execFileSync(cmd, args, { encoding: "utf8", timeout: 150_000, stdio: ["ignore", "pipe", "pipe"] });
 }
 function d1(sql) {
-  return run("npx", ["wrangler", "d1", "execute", "asyncrpg", "--remote", "--json", "--command", sql]);
+  return run("npx", [
+    "wrangler",
+    "d1",
+    "execute",
+    "asyncrpg",
+    LOCAL ? "--local" : "--remote",
+    "--json",
+    "--command",
+    sql,
+  ]);
 }
 function d1Rows(sql) {
   try {
