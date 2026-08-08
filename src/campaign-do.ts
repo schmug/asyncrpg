@@ -34,6 +34,24 @@ interface PendingRow extends Record<string, SqlStorageValue> {
   submitted_at: number;
 }
 
+/**
+ * What publication needs that canon does not carry: who is owed a recap, who
+ * was acted for, and the prose narration produced.
+ *
+ * The beat is kept *in the object* as well as in D1 because D1 is the one
+ * dependency on the publish path that can be unreachable or empty when the
+ * window ends. Holding a copy is what makes a read-model blip a recorded,
+ * recoverable projection failure instead of mail that is never delivered at
+ * all. D1 still wins when it answers — that is where a DM's rewrite lives.
+ */
+interface HeldFanOut {
+  tick: number;
+  recaps: Record<string, string[]>;
+  autoBy: Record<string, string>;
+  /** Absent only for a beat held by a build that predates this field. */
+  beat?: { prose: string; situation: string; source: string };
+}
+
 export interface CampaignInit {
   campaignId: string;
   slug: string;
@@ -564,7 +582,8 @@ export class CampaignDO extends DurableObject<Env> {
             .filter((r) => r.action.auto)
             .map((r) => [r.action.characterId, r.action.intent]),
         ),
-      });
+        beat: { prose: beat.prose, situation: beat.situation, source: beat.source },
+      } satisfies HeldFanOut);
       await this.#openReviewWindow(result.state.tick, windowMs);
       return { ...summaryFields, held: true };
     }
@@ -637,42 +656,80 @@ export class CampaignDO extends DurableObject<Env> {
     this.#put("heldTick", null);
     this.#put("windowClosesAt", null);
 
-    await this.#markPublished(tick);
+    // Past this line the beat is *claimed*: `phase` no longer says `review`, so
+    // the review alarm, the DM's button and the next tick's self-heal can none
+    // of them reach it again. Every remaining step therefore has to succeed or
+    // be recorded — an escaping throw would strand the beat with nothing left
+    // holding it, leave the alarm pointing at a window that has already closed
+    // (six days early on a weekly cadence, resolving the next tick that much
+    // ahead of the clock the group agreed to), and wedge whichever caller is on
+    // the other end. So the body is wrapped and the re-arm sits in a `finally`.
+    const campaignId = this.#get<WorldState>("world")?.campaignId ?? "unknown";
+    try {
+      await this.#markPublished(tick);
 
-    const held = this.#get<{
-      tick: number;
-      recaps: Record<string, string[]>;
-      autoBy: Record<string, string>;
-    }>("heldFanOut");
-    this.#put("heldFanOut", null);
+      const held = this.#get<HeldFanOut>("heldFanOut");
+      this.#put("heldFanOut", null);
 
-    const state = this.#world();
-    const meta = this.#get<{ name: string; slug: string }>("meta") ?? { name: "Campaign", slug: "c" };
-    const row = await this.env.DB.prepare(
-      "SELECT prose, situation, source FROM beats WHERE campaign_id = ? AND tick = ?",
-    )
-      .bind(state.campaignId, tick)
-      .first<{ prose: string; situation: string; source: string }>();
+      const state = this.#world();
+      const meta = this.#get<{ name: string; slug: string }>("meta") ?? { name: "Campaign", slug: "c" };
 
-    if (row && held) {
       // Read the prose back from D1 rather than from memory: the DM may have
       // rewritten it during the window, and what publishes must be their
-      // version, not the one narration produced.
-      const beat = { prose: row.prose, situation: row.situation, source: row.source } as Beat;
-      const resolutions = Object.entries(held.autoBy).map(([characterId, intent]) => ({
-        action: { characterId, intent, auto: true } as PlayerAction,
-      }));
-      this.ctx.waitUntil(
-        this.#fanOut(state, beat, { resolutions, recaps: held.recaps }, meta).catch((err) => {
-          console.error("fan-out failed", err);
-        }),
-      );
+      // version, not the one narration produced. D1 is the *authority* here,
+      // not a dependency — a read that throws or comes back empty falls back to
+      // the beat the object still holds, because a recoverable read-model
+      // failure must not silently become mail nobody ever receives.
+      let row: { prose: string; situation: string; source: string } | null = null;
+      let readFailure: unknown = null;
+      try {
+        row = await this.env.DB.prepare(
+          "SELECT prose, situation, source FROM beats WHERE campaign_id = ? AND tick = ?",
+        )
+          .bind(state.campaignId, tick)
+          .first<{ prose: string; situation: string; source: string }>();
+        if (!row) readFailure = new Error("no beats row at publication; using the narrated beat");
+      } catch (err) {
+        readFailure = err;
+      }
+      if (readFailure) {
+        await this.#recordProjectionFailure(state.campaignId, tick, "publish-read", readFailure);
+      }
+
+      const chosen = row ?? held?.beat ?? null;
+      if (chosen && held) {
+        const beat = { prose: chosen.prose, situation: chosen.situation, source: chosen.source } as Beat;
+        const resolutions = Object.entries(held.autoBy).map(([characterId, intent]) => ({
+          action: { characterId, intent, auto: true } as PlayerAction,
+        }));
+        this.ctx.waitUntil(
+          this.#fanOut(state, beat, { resolutions, recaps: held.recaps }, meta).catch((err) => {
+            console.error("fan-out failed", err);
+          }),
+        );
+      } else if (held) {
+        // Nothing to mail and nothing left to try. Rare — it needs the row gone
+        // *and* no held copy — but it is the one case that ends with a turn
+        // nobody sees, so it does not get to be silent.
+        await this.#recordProjectionFailure(
+          state.campaignId,
+          tick,
+          "publish-fanout",
+          new Error("no prose available for the held beat; nothing was mailed"),
+        );
+      }
+
+      if (opts.expired) await this.#countMissedWindow();
+      else await this.#resetMissedWindows();
+    } catch (err) {
+      await this.#recordProjectionFailure(campaignId, tick, "publish", err);
+    } finally {
+      try {
+        await this.#armFor(this.#get<number>("nextDeadlineAt") ?? Date.now() + 60_000);
+      } catch (err) {
+        await this.#recordProjectionFailure(campaignId, tick, "publish-rearm", err);
+      }
     }
-
-    if (opts.expired) await this.#countMissedWindow();
-    else await this.#resetMissedWindows();
-
-    await this.#armFor(this.#get<number>("nextDeadlineAt") ?? Date.now() + 60_000);
     return { published: true, tick };
   }
 

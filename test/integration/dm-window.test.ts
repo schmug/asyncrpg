@@ -7,11 +7,11 @@
  */
 
 import { env as runtimeEnv } from "cloudflare:workers";
-import { runInDurableObject } from "cloudflare:test";
-import { beforeEach, describe, expect, it } from "vitest";
+import { runDurableObjectAlarm, runInDurableObject } from "cloudflare:test";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { applySchema, resetDatabase } from "../helpers/schema";
 import { setSeat } from "../../src/dm/seat";
-import type { Env } from "../../src/env";
+import type { EmailSendMessage, Env } from "../../src/env";
 import type { WorldState } from "../../src/sim/types";
 
 const env = runtimeEnv as unknown as Env;
@@ -96,8 +96,96 @@ async function settleMail(expected: number): Promise<number[]> {
   return mailedTicks();
 }
 
+/**
+ * The messages themselves.
+ *
+ * `reply_bindings` records *that* a beat was mailed and under which tick, but
+ * nothing about its contents — so it cannot tell "the DM's rewrite went out"
+ * from "narration's draft went out", and it is written by `sendBeat` only after
+ * the binding succeeds. Wrapping the binding is the one place both facts are
+ * visible. The wrapper calls through, so the real Email Sending binding still
+ * validates every message.
+ *
+ * The Durable Object runs in this isolate and reads the same `env` object, so
+ * replacing the binding here reaches it too.
+ */
+let sent: EmailSendMessage[] = [];
+let realEmail: Env["EMAIL"] | null = null;
+
+/** Mail that has actually been handed to the binding. */
+async function settleSent(expected: number): Promise<EmailSendMessage[]> {
+  for (let i = 0; i < 60; i++) {
+    if (sent.length >= expected) break;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  await new Promise((r) => setTimeout(r, 250));
+  return sent;
+}
+
+/** The alarm itself — the real clock, not the D1 mirror players are shown. */
+async function alarmAt(): Promise<number | null> {
+  return runInDurableObject(stub(), (_i, state) => state.storage.getAlarm());
+}
+
+/**
+ * The tick deadline the object computed when the tick resolved.
+ *
+ * Read straight out of the object rather than from `snapshot()`: the mirror
+ * `deadlineAt` is written *from* this value, so comparing the two would prove
+ * nothing about where the alarm actually points.
+ */
+async function nextDeadlineAt(): Promise<number> {
+  return runInDurableObject(stub(), (_i, state) => {
+    const row = state.storage.sql
+      .exec<{ v: string }>("SELECT v FROM meta WHERE k = 'nextDeadlineAt'")
+      .toArray()[0];
+    if (!row) throw new Error("no nextDeadlineAt stored");
+    return JSON.parse(row.v) as number;
+  });
+}
+
+/**
+ * Wait out a window that has already elapsed, then make sure it is closed.
+ *
+ * Whether the pool delivers an expired alarm on its own is not this file's
+ * property to assert — `runDurableObjectAlarm` covers the handler directly
+ * elsewhere. Here the point is only that the window is over, so give the runtime
+ * a chance to end it and close it by hand if it did not. `publishHeldBeat` is
+ * idempotent, so the fallback is a no-op when the alarm already fired.
+ */
+async function settlePublished(): Promise<void> {
+  for (let i = 0; i < 40; i++) {
+    if ((await stub().reviewState()).phase === "open") return;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+  await stub().publishHeldBeat({ expired: true });
+}
+
+/** Every projection failure recorded for this campaign, oldest first. */
+async function failureKinds(): Promise<string[]> {
+  const { results } = await env.DB.prepare(
+    "SELECT kind FROM projection_failures WHERE campaign_id = ? ORDER BY created_at, id",
+  ).bind(CAMPAIGN).all<{ kind: string }>();
+  return results.map((r) => r.kind);
+}
+
 describe("review window", () => {
-  beforeEach(seedCampaign);
+  beforeEach(async () => {
+    await seedCampaign();
+    sent = [];
+    realEmail ??= env.EMAIL;
+    const pass = realEmail;
+    (env as { EMAIL: Env["EMAIL"] }).EMAIL = {
+      send: async (message: EmailSendMessage) => {
+        sent.push(message);
+        return pass.send(message);
+      },
+    };
+  });
+
+  afterEach(() => {
+    if (realEmail) (env as { EMAIL: Env["EMAIL"] }).EMAIL = realEmail;
+  });
 
   it("publishes immediately when no DM holds the seat", async () => {
     const summary = await stub().resolveTick("manual");
@@ -176,19 +264,156 @@ describe("review window", () => {
 
     // The alarm is the real clock; `deadlineAt` is only its D1 mirror. Assert
     // on both, or a drifting alarm hides behind a correct-looking countdown.
-    const duringReview = await runInDurableObject(stub(), (_i, state) => state.storage.getAlarm());
+    const duringReview = await alarmAt();
     expect(duringReview).toBeGreaterThan(before + maxWindowMs - 60_000);
     expect(duringReview).toBeLessThan(before + maxWindowMs + 60_000);
     expect((await stub().snapshot()).deadlineAt).toBeGreaterThan(before + weekMs - 60_000);
 
+    const deadline = await nextDeadlineAt();
     await stub().publishHeldBeat();
 
     // Publication hands the alarm back to the tick clock at the moment it was
     // always going to fire — the window came out of the front of the cycle.
-    const afterPublish = await runInDurableObject(stub(), (_i, state) => state.storage.getAlarm());
-    expect(afterPublish).toBeGreaterThan(before + weekMs - 60_000);
-    expect(afterPublish).toBeLessThan(before + weekMs + 60_000);
-    expect((await stub().snapshot()).deadlineAt).toBe(afterPublish);
+    // Exactly that moment: a band would accept a cycle restarted on publication.
+    expect(await alarmAt()).toBe(deadline);
+    expect((await stub().snapshot()).deadlineAt).toBe(deadline);
+  });
+
+  it("carves an elapsed review window out of the cycle, not onto it", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    // Short enough to sit through. The length does not matter to the property;
+    // what matters is that measurable time passes *inside* the window. The
+    // maximum-window case above publishes at t≈0, so a re-arm that restarts the
+    // cycle at publication is indistinguishable there from one that never
+    // moved — which is precisely how a window-length drift could hide.
+    await env.DB.prepare("UPDATE campaigns SET review_window_ms = 400 WHERE id = ?")
+      .bind(CAMPAIGN).run();
+
+    const before = Date.now();
+    const first = await stub().resolveTick("manual");
+    expect(first.held).toBe(true);
+
+    const weekMs = 7 * 24 * 3_600_000;
+    const deadline = await nextDeadlineAt();
+    expect(deadline).toBeGreaterThan(before + weekMs - 5_000);
+    expect(deadline).toBeLessThan(before + weekMs + 5_000);
+
+    // Live through the window, then publish however the runtime gets there.
+    await new Promise((r) => setTimeout(r, 500));
+    await settlePublished();
+
+    // The deadline is absolute from the moment the tick resolved, so the
+    // re-armed alarm is that number and not a number near it. Half a second of
+    // drift is the same bug as six days of it, and only exact equality says so.
+    expect(await alarmAt()).toBe(deadline);
+    expect((await stub().snapshot()).deadlineAt).toBe(deadline);
+    expect((await beatRow(first.tick))?.published_at).not.toBeNull();
+  });
+
+  it("ends the window when the alarm fires, rather than resolving another tick", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    const first = await stub().resolveTick("manual");
+    expect(first.held).toBe(true);
+    const deadline = await nextDeadlineAt();
+
+    // The alarm means two different things depending on the phase, and until
+    // now nothing in the suite ever fired it — a handler that always resolved a
+    // tick left the whole file green while making every cycle fire a window
+    // early. This runs the real `alarm()` through the runtime.
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+
+    // In `review` the alarm ends the *window*. Canon must not move: the beat
+    // players are about to read is still the newest thing that happened.
+    expect((await stub().snapshot()).tick).toBe(first.tick);
+    expect((await stub().reviewState())).toEqual({
+      phase: "open",
+      heldTick: null,
+      windowClosesAt: null,
+    });
+    expect((await beatRow(first.tick))?.published_at).not.toBeNull();
+    expect(await settleMail(1)).toEqual([first.tick]);
+
+    // And the alarm goes back to being the tick clock, at the original deadline.
+    expect(await alarmAt()).toBe(deadline);
+  });
+
+  it("resolves the tick when the alarm fires outside a window", async () => {
+    // The other half of the same branch: with no DM seated the alarm is the
+    // tick clock and must still advance canon.
+    const before = await stub().snapshot();
+    expect(await runDurableObjectAlarm(stub())).toBe(true);
+
+    const after = await stub().snapshot();
+    expect(after.tick).toBe(before.tick + 1);
+    expect((await beatRow(after.tick))?.published_at).not.toBeNull();
+  });
+
+  it("re-arms and still mails when the beat cannot be read back", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    const first = await stub().resolveTick("manual");
+    const deadline = await nextDeadlineAt();
+
+    // The read model goes away mid-window. That read sits *after* the phase has
+    // been claimed, so a throw there would clear `phase`/`heldTick` and then
+    // strand the beat: no path reaches a beat that is no longer in `review`.
+    await env.DB.prepare("ALTER TABLE beats RENAME TO beats_unreadable").run();
+
+    // Nothing may escape. From `alarm()` an escaping throw is retried into an
+    // early resolve; from the host's resolve route it wedges the tick outright.
+    const out = await stub().publishHeldBeat({ expired: true });
+    expect(out).toEqual({ published: true, tick: first.tick });
+    expect((await stub().reviewState()).phase).toBe("open");
+
+    // The alarm is back on the tick clock rather than left on a window that
+    // closed — which on a weekly cadence points six days into the past.
+    expect(await alarmAt()).toBe(deadline);
+
+    // The table still gets its beat, from the copy the object kept.
+    const mail = await settleSent(1);
+    expect(mail).toHaveLength(1);
+    expect(mail[0]!.subject).toContain(`Tick ${first.tick}`);
+
+    // And the drift is a row somebody can find and repair.
+    expect(await failureKinds()).toContain("publish-read");
+  });
+
+  it("mails the held beat when its row has been deleted", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    const first = await stub().resolveTick("manual");
+    const narrated = (await beatRow(first.tick))!.prose;
+
+    await env.DB.prepare("DELETE FROM beats WHERE campaign_id = ? AND tick = ?")
+      .bind(CAMPAIGN, first.tick).run();
+
+    // `published: true` has to mean somebody got mail. A recoverable read-model
+    // failure that quietly consumes a turn is worse than the outage it hides.
+    const out = await stub().publishHeldBeat();
+    expect(out).toEqual({ published: true, tick: first.tick });
+
+    const mail = await settleSent(1);
+    expect(mail).toHaveLength(1);
+    expect(mail[0]!.text).toContain(narrated);
+    expect(await failureKinds()).toContain("publish-read");
+  });
+
+  it("publishes the DM's rewrite, not the prose narration produced", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    const first = await stub().resolveTick("manual");
+    const narrated = (await beatRow(first.tick))!.prose;
+
+    // The whole reason the row is read back at publication. The object's copy
+    // is a fallback for a missing row, never a preference over a present one.
+    const rewritten = "The gate stood open, and nobody would say who had opened it.";
+    await env.DB.prepare("UPDATE beats SET prose = ? WHERE campaign_id = ? AND tick = ?")
+      .bind(rewritten, CAMPAIGN, first.tick).run();
+
+    await stub().publishHeldBeat();
+
+    const mail = await settleSent(1);
+    expect(mail).toHaveLength(1);
+    expect(mail[0]!.text).toContain(rewritten);
+    expect(mail[0]!.text).not.toContain(narrated);
+    expect(await failureKinds()).toEqual([]);
   });
 
   it("heals a lost review alarm by publishing on the next resolution", async () => {
@@ -271,6 +496,30 @@ describe("review window", () => {
 
     expect(racers.filter((r) => r.published)).toEqual([{ published: true, tick: summary.tick }]);
     expect(await settleMail(1)).toEqual([summary.tick]);
+  });
+
+  it("sends once even when the racers interleave inside the object", async () => {
+    await setSeat(env.DB, CAMPAIGN, HOST);
+    const summary = await stub().resolveTick("manual");
+
+    // Four separate RPCs are not a hard enough race: something ahead of the
+    // method serialises them, so moving the phase claim behind a D1 round-trip
+    // — the exact yield a future edit would introduce — leaves that test green.
+    // Calling the instance directly puts all four inside one context, where the
+    // first `await` really does hand control to the next caller. No sleeps: the
+    // interleaving is structural, so this cannot go flaky on a slow machine.
+    const racers = await runInDurableObject(stub(), (instance) =>
+      Promise.all([
+        instance.publishHeldBeat({ expired: true }),
+        instance.publishHeldBeat(),
+        instance.publishHeldBeat(),
+        instance.publishHeldBeat({ expired: true }),
+      ]),
+    );
+
+    expect(racers.filter((r) => r.published)).toEqual([{ published: true, tick: summary.tick }]);
+    expect(await settleMail(1)).toEqual([summary.tick]);
+    expect(await settleSent(1)).toHaveLength(1);
   });
 
   it("publishes the held beat under its own tick, not the one that healed it", async () => {
