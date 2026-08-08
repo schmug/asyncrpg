@@ -500,15 +500,26 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
-      const [snapshot, prompt, sheet, latest, openFailures] = await Promise.all([
-        campaignStub.snapshot(),
+      // One seat read, shared by the three things below that need it: the beat
+      // filter, `isDm`, and the seat control the app renders. Awaited twice
+      // rather than queried twice — a second `getSeat` here would be a second
+      // round trip to D1 for a row this request already has.
+      const seatRead = getSeat(env.DB, campaign.id);
+      const [snapshot, prompt, sheet, latest, openFailures, seat, review] = await Promise.all([
+        // Named, and that is load-bearing. `snapshot(viewerId)` masks a held
+        // turn's scene line from everyone but the seated DM, so calling it with
+        // no argument masked the DM from the very scene they are being asked to
+        // judge and left the privileged branch dead in production. An absent
+        // viewer still means "assume the least privilege" inside the object —
+        // this only stops the router from being anonymous to it.
+        campaignStub.snapshot(session.playerId),
         campaignStub.promptForPlayer(session.playerId),
         campaignStub.mySheet(session.playerId),
         // The DM sees the held beat — they cannot review what they cannot see.
         // Everyone else sees the most recent *published* one, which is a
         // fallback to the previous turn rather than to nothing.
         (async () => {
-          const seat = await getSeat(env.DB, campaign.id);
+          const seat = await seatRead;
           const dmSees = seat?.dmPlayerId === session.playerId;
           return env.DB.prepare(
             "SELECT tick, prose, source, published_at FROM beats WHERE campaign_id = ? " +
@@ -523,9 +534,17 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         )
           .bind(campaign.id)
           .first<{ n: number }>(),
+        seatRead,
+        campaignStub.reviewState(),
       ]);
       return json({
-        campaign: { slug: campaign.slug, ...snapshot },
+        campaign: {
+          slug: campaign.slug,
+          ...snapshot,
+          // So the app can say when an unattended beat goes out on its own,
+          // rather than only that one is waiting.
+          windowClosesAt: review.windowClosesAt,
+        },
         prompt,
         you: sheet,
         latestBeat: latest
@@ -538,6 +557,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
           : null,
         playerId: session.playerId,
         isHost: campaign.created_by === session.playerId,
+        // Both, because they answer different questions. `isDm` gates the
+        // review desk; `dmPlayerId` names the holder for everyone, which is how
+        // the host can see there is a DM to replace. An absent seat row leaves
+        // `dmPlayerId` null and `isDm` false, never true by accident.
+        isDm: seat?.dmPlayerId === session.playerId,
+        dmPlayerId: seat?.dmPlayerId ?? null,
         // Surfaced to the host so a chronicle drifting from canon is visible
         // rather than something only a log would ever show.
         chronicleNeedsRepair: (openFailures?.n ?? 0) > 0,

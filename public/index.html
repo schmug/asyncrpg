@@ -115,6 +115,31 @@
           <article id="beat" class="beat"></article>
         </section>
 
+        <!-- The review desk. Hidden for everyone but the seated DM and the
+             host, and populated entirely from app.js — the CSP forbids inline
+             script, and the prose here is model output that only ever reaches
+             the page through .value / .textContent. -->
+        <section id="dm-box" hidden>
+          <h2 id="dm-heading">You're the DM</h2>
+          <p id="dm-idle" class="fine" hidden>
+            Nothing waiting. You'll get an email when a turn is ready for you.
+          </p>
+          <div id="dm-review" hidden>
+            <p id="dm-window" class="fine"></p>
+            <label for="dm-prose">Turn <span id="dm-tick"></span> — nobody has seen this yet</label>
+            <textarea id="dm-prose" rows="10" maxlength="20000"></textarea>
+            <button id="dm-save" class="primary" type="button">Save changes</button>
+            <button id="dm-publish" class="primary" type="button">Send it to the group</button>
+          </div>
+          <details id="dm-seat-details">
+            <summary>Who runs this story</summary>
+            <p id="dm-holder" class="fine"></p>
+            <label for="dm-seat-to">Hand the DM seat to</label>
+            <select id="dm-seat-to"></select>
+            <button id="dm-seat-btn" class="primary" type="button">Hand it over</button>
+          </details>
+        </section>
+
         <form id="action-form" novalidate>
           <label for="action" id="action-label">What do you do?</label>
           <textarea

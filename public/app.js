@@ -187,6 +187,15 @@ function renderCampaign(data) {
   const beat = $("beat");
   beat.textContent = "";
   if (data.latestBeat) {
+    // Only the DM is ever handed a held beat, and in their view this box sits
+    // directly above the draft they are editing. Unmarked, the draft reads as
+    // the story the group has already been told.
+    if (data.latestBeat.held) {
+      const tag = document.createElement("span");
+      tag.className = "tag";
+      tag.textContent = "not sent to the group yet";
+      beat.append(tag);
+    }
     if (data.latestBeat.source !== "model") {
       const tag = document.createElement("span");
       tag.className = "tag";
@@ -208,6 +217,7 @@ function renderCampaign(data) {
   }
 
   renderSheet(data.you);
+  renderDm(data);
 
   const repair = $("c-repair");
   repair.hidden = !data.chronicleNeedsRepair;
@@ -232,6 +242,98 @@ function renderCampaign(data) {
 
   $("c-chronicle").href = `/c/${encodeURIComponent(c.slug)}`;
   show("view-campaign");
+}
+
+/**
+ * Every field the DM's panel writes, back to empty.
+ *
+ * Named once so the two paths that leave nothing to review — no held beat, and
+ * no panel at all — cannot drift apart, and so adding a field to the panel has
+ * one obvious place to be cleared from.
+ */
+function emptyDmPanel() {
+  $("dm-prose").value = "";
+  $("dm-tick").textContent = "";
+  $("dm-window").textContent = "";
+  $("dm-holder").textContent = "";
+  $("dm-seat-to").textContent = "";
+}
+
+/**
+ * The DM's panel.
+ *
+ * Two audiences, deliberately not one. The seated DM gets the review desk: the
+ * held beat, an edit, and a publish. The host gets only the seat control, so a
+ * campaign can never end up with a DM nobody can replace — which is exactly
+ * who `POST /dm` accepts, and this must not offer a control the server refuses.
+ *
+ * A held beat is shown to its DM and to nobody else. `isDm` and `held` are both
+ * server facts: the campaign GET already filters an unpublished beat out of
+ * every other member's response, so a member who is not the DM has no held
+ * prose in `data` to leak in the first place. This is the second lock, not the
+ * only one.
+ *
+ * The prose is model output. It goes into a textarea via `.value`, and the
+ * holder's name through `.textContent` — never innerHTML.
+ */
+function renderDm(data) {
+  const box = $("dm-box");
+  const canMoveSeat = Boolean(data.isDm || data.isHost);
+  box.hidden = !canMoveSeat;
+  if (!canMoveSeat) {
+    // Emptied on the way out, not only in the `else` below. This is a
+    // single-page app: navigating from a campaign you run to one you merely
+    // play in re-renders into the same nodes, and hiding the panel does not
+    // empty it. Leaving the previous campaign's held draft sitting in a
+    // hidden textarea makes the comment below a lie.
+    emptyDmPanel();
+    return;
+  }
+
+  // A host who is not the DM is here for the seat control alone, and must not
+  // be told they hold a chair they do not.
+  $("dm-heading").textContent = data.isDm ? "You're the DM" : "Who runs this story";
+
+  const held = data.isDm && data.latestBeat?.held ? data.latestBeat : null;
+  $("dm-review").hidden = !held;
+  $("dm-idle").hidden = !data.isDm || Boolean(held);
+
+  if (held) {
+    $("dm-tick").textContent = String(held.tick);
+    $("dm-prose").value = held.prose;
+    $("dm-window").textContent = data.campaign.windowClosesAt
+      ? `Publishes on its own ${relative(data.campaign.windowClosesAt)} if you do nothing.`
+      : "Publishes on its own if you do nothing.";
+  } else {
+    // Nothing to review means nothing left lying in the box: a stale draft here
+    // would be published by the next tap of a button that is about to reappear.
+    // The holder line and the seat list this also clears are rewritten just
+    // below — they are facts about the campaign, not about the held beat.
+    emptyDmPanel();
+  }
+
+  const holder = data.campaign.cast.find((m) => m.playerId === data.dmPlayerId);
+  $("dm-holder").textContent = data.dmPlayerId
+    ? `${holder ? holder.name : "Someone"} holds the DM seat.`
+    : "Nobody holds the DM seat — turns publish as soon as they resolve.";
+
+  const to = $("dm-seat-to");
+  to.textContent = "";
+  for (const m of data.campaign.cast) {
+    const option = document.createElement("option");
+    option.value = m.playerId;
+    option.textContent = m.name;
+    if (m.playerId === data.dmPlayerId) option.selected = true;
+    to.append(option);
+  }
+  const none = document.createElement("option");
+  none.value = "";
+  none.textContent = "Nobody — publish turns immediately";
+  // Selected explicitly when the seat is empty. Without this the select falls
+  // back to its first option, and "hand it over" with nothing touched would
+  // hand the story to whoever happens to sort first.
+  if (!data.dmPlayerId) none.selected = true;
+  to.append(none);
 }
 
 function renderSheet(you) {
@@ -361,6 +463,68 @@ $("invite-btn").addEventListener("click", async () => {
     button.disabled = false;
   }
 });
+
+// ─── the DM's controls ─────────────────────────────────────────────────────
+
+/**
+ * Shared button handler: call an endpoint, report it, re-render.
+ *
+ * The re-render is what keeps the panel honest — every one of these changes
+ * something the panel is displaying (the seat, the beat, whether one is still
+ * held), so the answer has to come back from the server rather than be assumed
+ * here. `build()` returning null is a validation refusal that has already said
+ * so; it must not disable the button or fire a request.
+ */
+function wireDmButton(id, build, onOk) {
+  $(id).addEventListener("click", async () => {
+    const button = $(id);
+    const call = build();
+    if (call === null) return;
+    button.disabled = true;
+    try {
+      const out = await api(`/api/campaigns/${encodeURIComponent(currentSlug)}${call.path}`, {
+        method: call.method,
+        body: call.body === undefined ? undefined : JSON.stringify(call.body),
+      });
+      say(onOk(out), "ok");
+      await load();
+    } catch (err) {
+      say(err.message, "err");
+    } finally {
+      button.disabled = false;
+    }
+  });
+}
+
+wireDmButton(
+  "dm-save",
+  () => {
+    const prose = $("dm-prose").value.trim();
+    if (!prose) {
+      say("Write something, or leave it as it is.", "err");
+      return null;
+    }
+    const tick = Number($("dm-tick").textContent);
+    if (!Number.isInteger(tick)) {
+      say("Nothing is waiting for you right now.", "err");
+      return null;
+    }
+    return { method: "PATCH", path: "/dm/beat", body: { tick, prose } };
+  },
+  () => "Saved. Nobody has seen it yet — send it when you're ready.",
+);
+
+wireDmButton(
+  "dm-publish",
+  () => ({ method: "POST", path: "/dm/publish" }),
+  (out) => (out.published ? "Sent. The group has it now." : "Nothing was waiting."),
+);
+
+wireDmButton(
+  "dm-seat-btn",
+  () => ({ method: "POST", path: "/dm", body: { playerId: $("dm-seat-to").value || null } }),
+  (out) => (out.dmPlayerId ? "Done — they run the story now." : "Seat vacated."),
+);
 
 let inviteToken = null;
 
