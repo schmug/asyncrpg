@@ -260,8 +260,9 @@ Who's who in this turn:
 
 | Failure | Behaviour |
 |---|---|
-| `findMentions` finds nothing | Email byte-identical to today's |
-| `findMentions` hits unexpected input | Returns `[]`; same as above |
+| `scanProse` finds nothing | Email byte-identical to today's |
+| `scanProse` hits malformed state | Returns `{ mentions: [], segments: [{ type: "text", value: prose }] }`. The fallback is a **single text segment, not an empty list** — an empty list would break the segment round-trip the email body is rebuilt from. Same visible outcome as above |
+| An entity row is malformed | `blurbFor` returns `""`. Consumers must treat an empty blurb as *omit the subtitle*, not *render an empty element* |
 | Entity absent from `entities` (projection lag) | Soft 404: "This entry hasn't been recorded yet", with a link back. A link in a *sent* email is permanent; a bare 404 is a broken promise |
 | Events query fails | Identity block renders; no 500 |
 | Chronicle is private | 403, same as the chronicle itself |
@@ -279,10 +280,24 @@ Tests are written before the implementation, per the repo's loop.
 - unrevealed threat never matched
 - dead NPC still matched
 - player characters never matched
-- an entity named `<script>alert(1)</script>` yields no raw tag in output
+- an entity named `<script>alert(1)</script>` comes back **raw and unescaped** —
+  see the re-scoping note below
 - empty prose, or a world with no entities, returns `[]`
 - `sizeLabel` and `dangerLabel` band at their stated boundaries, and no blurb
   contains a digit drawn from a 0–100 field
+- **totality** (added after review): a missing state bucket, a row with no
+  `name`, a row with no `kind`, a non-object row, a row with no id, and a
+  `null`/non-object state each return without throwing, and the segment
+  round-trip still holds
+
+> **Re-scoped 2026-08-08.** This list originally read "an entity named
+> `<script>alert(1)</script>` yields no raw tag in output", asserted against
+> this module. That is the opposite of the correct contract. `scanProse`
+> returns segments *raw* precisely so the caller can escape each one
+> individually — escaping here would double-escape downstream. The no-raw-tag
+> assertion belongs to `test/email/outbound.test.ts`, where it now lives; this
+> module instead asserts the raw contract explicitly so the boundary is
+> documented rather than assumed.
 
 **`test/email/outbound.test.ts`** (new)
 
@@ -290,6 +305,8 @@ Tests are written before the implementation, per the repo's loop.
 - text part carries the who's-who block with resolvable URLs
 - **zero mentions ⇒ output identical to the pre-change baseline**
 - prose containing `&` and `<` stays correctly escaped around a link
+- **an entity named `<script>alert(1)</script>` yields no raw tag in either
+  MIME part** — moved here from the `mentions` list above
 
 **`test/web/dossier.test.ts`**
 
