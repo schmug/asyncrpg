@@ -8,7 +8,17 @@ import {
   sizeLabel,
   type LinkableKind,
 } from "../../src/lore/mentions";
+import { THREAT_KINDS, type WorldState } from "../../src/sim/types";
 import { world } from "./fixtures";
+
+/**
+ * A `WorldState` that has been through D1: `entities.data` is TEXT, so a row
+ * parses into *some* object but is not guaranteed to be the shape. Casting is
+ * how the read side actually receives this data.
+ */
+function loose(state: WorldState): Record<string, Record<string, unknown>> {
+  return state as unknown as Record<string, Record<string, unknown>>;
+}
 
 /** The five kinds a `LinkableKind` may legitimately be. */
 const KINDS = ["faction", "npc", "settlement", "region", "threat"] as const;
@@ -122,6 +132,26 @@ describe("blurbs", () => {
 
   it("describes a threat with a grammatical phrase", () => {
     expect(blurbFor("threat", "thr_0", w)).toBe("a blight in Thornreach");
+  });
+
+  it("has a phrase for every threat kind the sim can produce", () => {
+    // `THREAT_PHRASE` is typed `Record<ThreatKind, string>`, so an eighth kind
+    // added to `src/sim/types.ts` is a compile error rather than a silent
+    // "a danger in …". This test is the runtime half of that guarantee.
+    const w2 = world();
+    for (const kind of THREAT_KINDS) {
+      w2.threats.thr_0!.kind = kind;
+      const blurb = blurbFor("threat", "thr_0", w2);
+      expect(blurb, kind).toMatch(/ in Thornreach$/);
+      expect(blurb, kind).not.toMatch(/\bdanger\b/);
+    }
+  });
+
+  it("returns an empty string for a threat row with no recognisable kind", () => {
+    // A row read back from `entities.data` can parse and still not be a Threat.
+    const malformed = world();
+    loose(malformed).threats!.thr_bad = { id: "thr_bad", name: "the Nameless", regionId: "rgn_0" };
+    expect(blurbFor("threat", "thr_bad", malformed)).toBe("");
   });
 
   it("marks a resolved threat as ended", () => {
@@ -286,6 +316,67 @@ describe("scanProse", () => {
     ]);
   });
 
+  // Eligibility is a rule per kind, and each rule needs its own witness —
+  // "the faction case passes" is not evidence that regions are matched at all.
+
+  it("still matches a defunct faction", () => {
+    expect(scanProse("House Vresk rode out.", w).mentions).toEqual([
+      { id: "fac_1", kind: "faction", name: "House Vresk", blurb: "broken and scattered" },
+    ]);
+  });
+
+  it("still matches a razed settlement", () => {
+    expect(scanProse("Smoke still rises over Kelford.", w).mentions).toEqual([
+      { id: "stl_1", kind: "settlement", name: "Kelford", blurb: "abandoned" },
+    ]);
+  });
+
+  it("matches a region", () => {
+    expect(scanProse("Thornreach lay quiet.", w).mentions).toEqual([
+      { id: "rgn_0", kind: "region", name: "Thornreach", blurb: "forest · dangerous" },
+    ]);
+  });
+
+  it("matches a revealed threat", () => {
+    expect(scanProse("The Grey Blight spread west.", w).mentions).toEqual([
+      { id: "thr_0", kind: "threat", name: "the Grey Blight", blurb: "a blight in Thornreach" },
+    ]);
+  });
+
+  it("matches a resolved threat that was never revealed", () => {
+    // The `resolved` half of the `revealed || resolved` rule: a threat the
+    // party ended before anyone named it is still safe to link, because the
+    // projection already published it (`src/campaign-do.ts:660`).
+    const ended = world();
+    ended.threats.thr_1!.resolved = true;
+    expect(scanProse("Word of the Kelth raiders spread.", ended).mentions).toEqual([
+      {
+        id: "thr_1",
+        kind: "threat",
+        name: "the Kelth raiders",
+        blurb: "raiders in Thornreach · ended",
+      },
+    ]);
+  });
+
+  it("returns matched text raw and unescaped — escaping is the caller's job", () => {
+    // Spec §11 asks for "an entity named <script>alert(1)</script> yields no
+    // raw tag in output". That belongs to the *renderer*, not here: scanProse
+    // deliberately returns raw text so the caller can escape each segment
+    // individually and a match can never straddle an escape sequence. This
+    // test pins the raw contract; the no-raw-tag assertion is enforced by the
+    // HTML-escaping test in test/email/outbound.test.ts (Task 5).
+    const scripted = world();
+    scripted.settlements.stl_0!.name = "<script>alert(1)</script>";
+    const prose = "They rode to <script>alert(1)</script> at dawn.";
+    const { mentions, segments } = scanProse(prose, scripted);
+    expect(mentions.map((m) => m.name)).toEqual(["<script>alert(1)</script>"]);
+    expect(segments.filter((s) => s.type === "mention").map((s) => s.value)).toEqual([
+      "<script>alert(1)</script>",
+    ]);
+    expect(rejoin(segments)).toBe(prose);
+  });
+
   it("never matches a player character", () => {
     const withParty = world();
     withParty.characters.chr_p1 = {
@@ -353,5 +444,88 @@ describe("scanProse", () => {
     bare.regions = {};
     bare.threats = {};
     expect(scanProse("Nothing here.", bare).mentions).toEqual([]);
+  });
+});
+
+/**
+ * `scanProse` is total: it never throws, for any input.
+ *
+ * This is not defensive padding. `#fanOut` is invoked as
+ * `this.#fanOut(...).catch((err) => console.error("fan-out failed", err))`
+ * (`src/campaign-do.ts:519-521`), so a throw from here is swallowed and the
+ * whole tick's beat email is lost — for every player in the campaign, on the
+ * product's primary channel. Spec §10 promises that a detection failure
+ * degrades to email byte-identical to today's, which requires the prose to
+ * survive intact even when detection gives up entirely.
+ *
+ * Hence every case below asserts the lossless round-trip as well as the
+ * absence of a throw: a scan that returns no segments would leave the caller
+ * rebuilding the body from nothing.
+ */
+describe("scanProse totality", () => {
+  const PROSE = "The Ashen Coil sent word to Vresford at dusk.";
+
+  it("survives a WorldState with a bucket missing entirely", () => {
+    const gutted = world();
+    delete (gutted as Partial<WorldState>).threats;
+    const scan = scanProse(PROSE, gutted);
+    expect(rejoin(scan.segments)).toBe(PROSE);
+    // The surviving buckets still work — degrade, don't disable.
+    expect(scan.mentions.map((m) => m.id)).toEqual(["fac_0", "stl_0"]);
+  });
+
+  it("survives an own row with no name", () => {
+    const nameless = world();
+    loose(nameless).factions!.fac_bad = { id: "fac_bad" };
+    const scan = scanProse(PROSE, nameless);
+    expect(rejoin(scan.segments)).toBe(PROSE);
+    expect(scan.mentions.map((m) => m.id)).toEqual(["fac_0", "stl_0"]);
+  });
+
+  it("survives an own row with a name but no kind", () => {
+    // Passes `Object.hasOwn`, so the prototype guard does not catch it. This
+    // is the shape a half-written or migrated `entities.data` row takes.
+    const kindless = world();
+    loose(kindless).factions!.fac_bad = { id: "fac_bad", name: "Hollow Writ" };
+    const scan = scanProse("The Hollow Writ met at dusk.", kindless);
+    expect(rejoin(scan.segments)).toBe("The Hollow Writ met at dusk.");
+    expect(scan.mentions.map((m) => m.id)).toEqual(["fac_bad"]);
+    // No usable identity facts, so no blurb — but a name, a link, and no throw.
+    expect(scan.mentions[0]!.blurb).toBe("");
+  });
+
+  it("survives a null or empty state", () => {
+    for (const state of [null, undefined, {}, [], "nope", 7]) {
+      const scan = scanProse(PROSE, state as unknown as WorldState);
+      expect(scan.mentions, String(state)).toEqual([]);
+      expect(rejoin(scan.segments), String(state)).toBe(PROSE);
+    }
+  });
+
+  it("survives an entity row that is not an object at all", () => {
+    const junk = world();
+    loose(junk).npcs!.npc_bad = null as unknown as Record<string, unknown>;
+    loose(junk).settlements!.stl_bad = "Vresford" as unknown as Record<string, unknown>;
+    const scan = scanProse(PROSE, junk);
+    expect(rejoin(scan.segments)).toBe(PROSE);
+  });
+
+  it("never emits a mention without a linkable id", () => {
+    // `mention.id` becomes a dossier URL. A row with no id would render
+    // /c/<slug>/who/undefined — a permanent dead link in a sent email.
+    const idless = world();
+    // A name no other entity shares, and the longest in the world, so it is
+    // tried first and cannot be masked by a well-formed row winning the span.
+    loose(idless).settlements!.stl_bad = { name: "The Drowned Quarter" };
+    const prose = "Word reached The Drowned Quarter from Vresford by dusk.";
+    const scan = scanProse(prose, idless);
+
+    // The well-formed row still matches, so this is not passing vacuously.
+    expect(scan.mentions.map((m) => m.id)).toEqual(["stl_0"]);
+    for (const m of scan.mentions) {
+      expect(typeof m.id, JSON.stringify(m)).toBe("string");
+      expect(m.id.length, JSON.stringify(m)).toBeGreaterThan(0);
+    }
+    expect(rejoin(scan.segments)).toBe(prose);
   });
 });

@@ -11,7 +11,15 @@
  * a reader learns that a region is "dangerous", not that its danger is 52.
  */
 
-import type { WorldState } from "../sim/types";
+import type {
+  Faction,
+  Npc,
+  Region,
+  Settlement,
+  Threat,
+  ThreatKind,
+  WorldState,
+} from "../sim/types";
 
 export type LinkableKind = "faction" | "npc" | "settlement" | "region" | "threat";
 
@@ -36,8 +44,14 @@ export function dangerLabel(danger: number): string {
   return "quiet";
 }
 
-/** Article baked in, so the blurb reads as English in a list. */
-const THREAT_PHRASE: Record<string, string> = {
+/**
+ * Article baked in, so the blurb reads as English in a list.
+ *
+ * Keyed by `ThreatKind`, not `string`: an eighth kind added to
+ * `src/sim/types.ts` must be a compile error here, not a silent generic
+ * fallback that quietly ships "a danger in Thornreach" to every player.
+ */
+const THREAT_PHRASE: Record<ThreatKind, string> = {
   blight: "a blight",
   raiders: "raiders",
   plague: "a plague",
@@ -67,48 +81,70 @@ function own<T>(map: Record<string, T> | undefined, id: unknown): T | undefined 
   return map[id];
 }
 
+/**
+ * A row that passed `Object.hasOwn` is still only *probably* the shape it
+ * claims. `entities.data` is TEXT: it parses into some object, and a
+ * half-written or pre-migration row can be `{}`. Reading a missing field is
+ * how `f.kind.replace` throws and how "undefined" reaches a reader's inbox.
+ */
+function str(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+/** The display name of a referenced row, or "" when the reference is unusable. */
+function nameOf(row: { name?: unknown } | undefined): string {
+  return typeof row?.name === "string" ? row.name : "";
+}
+
 export function blurbFor(kind: LinkableKind, id: string, state: WorldState): string {
   switch (kind) {
     case "faction": {
       const f = own(state.factions, id);
       if (!f) return "";
       if (f.defunct) return "broken and scattered";
-      const seat = own(state.settlements, f.seatSettlementId);
-      const what = f.kind.replace(/_/g, " ");
-      return seat ? `${what} · seated at ${seat.name}` : what;
+      const what = str(f.kind).replace(/_/g, " ");
+      if (!what) return "";
+      const seat = nameOf(own(state.settlements, f.seatSettlementId));
+      return seat ? `${what} · seated at ${seat}` : what;
     }
     case "npc": {
       const n = own(state.npcs, id);
       if (!n) return "";
-      if (!n.alive) return `${n.role} · died`;
-      const faction = own(state.factions, n.factionId);
+      const role = str(n.role);
+      if (!n.alive) return role ? `${role} · died` : "died";
+      const faction = nameOf(own(state.factions, n.factionId));
       // `locationId` may name either bucket; settlements are simply tried first.
-      const place = own(state.settlements, n.locationId) ?? own(state.regions, n.locationId);
+      const place = nameOf(own(state.settlements, n.locationId) ?? own(state.regions, n.locationId));
       return (
-        n.role +
-        (faction ? ` of ${faction.name}` : "") +
-        (place ? `, at ${place.name}` : "")
-      );
+        role +
+        (faction ? ` of ${faction}` : "") +
+        (place ? `, at ${place}` : "")
+      ).trim();
     }
     case "settlement": {
       const s = own(state.settlements, id);
       if (!s) return "";
       if (s.razed) return "abandoned";
-      const region = own(state.regions, s.regionId);
+      const region = nameOf(own(state.regions, s.regionId));
       const size = sizeLabel(s.population);
-      return region ? `${size} in ${region.name}` : size;
+      return region ? `${size} in ${region}` : size;
     }
     case "region": {
       const r = own(state.regions, id);
       if (!r) return "";
-      return `${r.terrain} · ${dangerLabel(r.danger)}`;
+      const terrain = str(r.terrain);
+      return terrain ? `${terrain} · ${dangerLabel(r.danger)}` : "";
     }
     case "threat": {
       const t = own(state.threats, id);
       if (!t) return "";
-      const phrase = THREAT_PHRASE[t.kind] ?? "a danger";
-      const region = own(state.regions, t.regionId);
-      const where = region ? `${phrase} in ${region.name}` : phrase;
+      // No `?? "a danger"`: the map is exhaustive over `ThreatKind` by type, so
+      // a miss here means a malformed row rather than a new kind, and a row we
+      // cannot describe gets no blurb rather than a plausible-sounding one.
+      const phrase = THREAT_PHRASE[t.kind];
+      if (!phrase) return "";
+      const region = nameOf(own(state.regions, t.regionId));
+      const where = region ? `${phrase} in ${region}` : phrase;
       return t.resolved ? `${where} · ended` : where;
     }
     // TypeScript proves the switch exhaustive over `LinkableKind`, but the
@@ -155,27 +191,67 @@ interface Candidate {
   name: string;
 }
 
+/**
+ * `Object.values` throws on `null`/`undefined`, and a `WorldState` rebuilt from
+ * projected rows can be missing a bucket outright — the dossier renderer builds
+ * one by hand. Rows that are not objects are dropped rather than dereferenced.
+ */
+function rows<T>(bucket: unknown): T[] {
+  if (!bucket || typeof bucket !== "object") return [];
+  return Object.values(bucket as Record<string, unknown>).filter(
+    (row): row is T => !!row && typeof row === "object",
+  );
+}
+
 function candidates(state: WorldState): Candidate[] {
+  const s = (state ?? {}) as Partial<WorldState>;
   const out: Candidate[] = [];
-  for (const f of Object.values(state.factions)) out.push({ id: f.id, kind: "faction", name: f.name });
-  for (const n of Object.values(state.npcs)) out.push({ id: n.id, kind: "npc", name: n.name });
-  for (const s of Object.values(state.settlements)) out.push({ id: s.id, kind: "settlement", name: s.name });
-  for (const r of Object.values(state.regions)) out.push({ id: r.id, kind: "region", name: r.name });
-  for (const t of Object.values(state.threats)) {
+  for (const f of rows<Faction>(s.factions)) out.push({ id: f.id, kind: "faction", name: f.name });
+  for (const n of rows<Npc>(s.npcs)) out.push({ id: n.id, kind: "npc", name: n.name });
+  for (const c of rows<Settlement>(s.settlements)) out.push({ id: c.id, kind: "settlement", name: c.name });
+  for (const r of rows<Region>(s.regions)) out.push({ id: r.id, kind: "region", name: r.name });
+  for (const t of rows<Threat>(s.threats)) {
     // Same rule the projection enforces (`src/campaign-do.ts:660`): an
     // unrevealed threat must not leak.
     if (t.revealed || t.resolved) out.push({ id: t.id, kind: "threat", name: t.name });
   }
   // Player characters are deliberately absent.
   return out
-    .filter((c) => c.name.length >= MIN_NAME_LENGTH)
+    .filter(
+      (c) =>
+        // An id is what becomes a dossier URL; without one the mention would
+        // render a permanent dead link into an email that cannot be recalled.
+        typeof c.id === "string" &&
+        c.id.length > 0 &&
+        typeof c.name === "string" &&
+        c.name.length >= MIN_NAME_LENGTH,
+    )
     // Longest first, so `House Vresk` claims its span before `Vresk` is tried.
     .sort((a, b) => b.name.length - a.name.length);
 }
 
+/**
+ * Totality is a hard promise, not defensive padding.
+ *
+ * `#fanOut` is invoked as `.catch((err) => console.error("fan-out failed",
+ * err))` (`src/campaign-do.ts:519-521`), so a throw raised here is swallowed
+ * and the entire tick's beat email is lost — for every player in the campaign,
+ * on the product's primary channel. Spec §10 promises a detection failure
+ * degrades to output byte-identical to today's, which means the prose has to
+ * survive even when detection gives up completely.
+ */
 export function scanProse(prose: string, state: WorldState): MentionScan {
-  if (!prose) return { mentions: [], segments: [] };
+  if (typeof prose !== "string" || !prose) return { mentions: [], segments: [] };
+  try {
+    return scan(prose, state);
+  } catch {
+    // One text segment, not an empty list: the caller rebuilds the body by
+    // concatenating segments, so `[]` would drop the beat's prose entirely.
+    return { mentions: [], segments: [{ type: "text", value: prose }] };
+  }
+}
 
+function scan(prose: string, state: WorldState): MentionScan {
   const claimed: { start: number; end: number; candidate: Candidate }[] = [];
 
   for (const candidate of candidates(state)) {
