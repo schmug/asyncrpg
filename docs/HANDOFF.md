@@ -167,17 +167,24 @@ What slice 1 landed:
 - **The held-beat notice** — when a window opens the DM is mailed the beat, a
   link, and the publish time (`#notifyDm`, `src/campaign-do.ts:893`;
   `reviewNoticeSubject` at `src/email/outbound.ts:196`, `reviewNoticeBody` at
-  `:213`, `sendReviewNotice` at `:263`).
+  `:222`, `sendReviewNotice` at `:272`).
   Detached and swallowed on purpose: the window closes on its alarm regardless,
   so a bounce costs a notification, never a turn.
 
-  **Known gap:** the notice links to `#/c/<slug>/review`
-  (`reviewUrl`, `src/email/outbound.ts:209-211`), and the app's hash router
-  matches `^#/c/([a-z0-9-]{2,31})$` with no trailing segment
-  (`public/app.js:641`). An unmatched hash falls through to `renderHome`, so the
-  DM lands on their campaign list instead of the held beat and has to click
-  through. Fix it in either direction — drop `/review` from the link, or widen
-  the route — but do not leave them disagreeing.
+  The link points at `#/c/<slug>` (`reviewUrl`, `src/email/outbound.ts:218`),
+  which is exactly what the app's hash router matches —
+  `^#/c/([a-z0-9-]{2,31})$`, no trailing segment (`public/app.js:641`).
+  **Do not turn this into a `/review` sub-route.** It shipped that way once: an
+  unmatched hash falls through to `renderHome`, so the DM landed on their
+  campaign list instead of the beat they had just been emailed about. There is
+  no separate review screen to route to in any case — the desk renders inline on
+  the campaign page for whoever holds the seat (`#dm-box`,
+  `public/index.html:122-140`; `renderDm`, `public/app.js:279`), so the campaign
+  link already arrives at it. `test/integration/dm-notice.test.ts` asserts the
+  composed URL matches the router's pattern, so the two cannot drift apart again
+  silently — though it holds its own copy of the regex (the router lives in
+  browser code with no module boundary), so changing `public/app.js:641` still
+  needs a matching edit there.
 - **Held beats are invisible to everyone but the DM** — the chronicle filters
   `published_at IS NOT NULL` unless the viewer holds the seat
   (`src/web/chronicle.ts:112`), and the campaign GET applies the same filter
