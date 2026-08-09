@@ -142,13 +142,59 @@ export function normalizeIntent(intent: string, characterName: string): string {
   return text.slice(0, 160);
 }
 
-const OUTCOME_PHRASE: Record<Outcome, string> = {
-  critical_success: "and it goes better than anyone expected",
-  success: "and it works",
-  partial: "and it half-works",
-  failure: "and it does not go well",
-  critical_failure: "and it goes badly wrong",
+/**
+ * How an outcome is written into the event log.
+ *
+ * Several phrasings each, because these lines are what the chronicle's
+ * turning-points timeline is built from and they stack up on one page: with a
+ * single phrasing per outcome, a seven-turn demo said "and it goes better than
+ * anyone expected" six times, which reads as a changelog rather than a story.
+ *
+ * The choice is deterministic and deliberately *not* drawn from the tick's
+ * `Rng`. Consuming from that stream would shift every roll after it, changing
+ * outcomes across the whole simulation to vary a turn of phrase.
+ */
+const OUTCOME_PHRASES: Record<Outcome, readonly string[]> = {
+  critical_success: [
+    "and it goes better than anyone expected",
+    "and it lands better than it had any right to",
+    "and everything falls the right way at once",
+    "and it goes so well it unsettles them",
+  ],
+  success: [
+    "and it works",
+    "and it holds",
+    "and it comes off clean",
+    "and it does what it was meant to",
+  ],
+  partial: [
+    "and it half-works",
+    "and it gets most of the way there",
+    "and it works, but not cleanly",
+    "and half of it comes loose",
+  ],
+  failure: [
+    "and it does not go well",
+    "and it comes to nothing",
+    "and it slips away from them",
+    "and the whole of it falls short",
+  ],
+  critical_failure: [
+    "and it goes badly wrong",
+    "and it goes wrong in a way that will be remembered",
+    "and it fails hard enough to cost something",
+    "and it comes apart entirely",
+  ],
 };
+
+/** Stable, cheap, and independent of the tick's random stream. */
+function outcomePhrase(outcome: Outcome, characterId: string, tick: number, kind: string): string {
+  const options = OUTCOME_PHRASES[outcome];
+  const key = `${characterId}|${tick}|${kind}`;
+  let hash = 0;
+  for (let i = 0; i < key.length; i++) hash = (hash * 31 + key.charCodeAt(i)) >>> 0;
+  return options[hash % options.length]!;
+}
 
 export function resolveAction(
   state: WorldState,
@@ -346,7 +392,7 @@ export function resolveAction(
   const events = [
     log.add(
       "player_action",
-      `${character.name} ${phrase}${detail}, ${OUTCOME_PHRASE[outcome]}.`,
+      `${character.name} ${phrase}${detail}, ${outcomePhrase(outcome, character.id, state.tick, action.kind)}.`,
       {
         actorId: character.id,
         targetIds: target ? [target] : [],

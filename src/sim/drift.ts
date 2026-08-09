@@ -317,7 +317,13 @@ export function describeScene(state: WorldState): void {
   }
   if (region && region.danger >= 55) clauses.push("the roads are not safe");
 
-  state.scene.situation = `${clauses.join(". ")}.`.slice(0, 200);
+  // Each clause is written lowercase so it can be composed; joining them
+  // naively produced ". the market has thinned to almost nothing. the Hollow
+  // Hunger is taking a real toll." on the live campaign page. They are
+  // sentences once joined, so they are capitalized like sentences.
+  state.scene.situation = `${clauses
+    .map((c) => c.charAt(0).toUpperCase() + c.slice(1))
+    .join(". ")}.`.slice(0, 200);
 }
 
 /**

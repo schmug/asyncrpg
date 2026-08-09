@@ -10,6 +10,14 @@ export interface Env {
   MODEL_CHEAP: string;
   CAMPAIGN_MONTHLY_TOKEN_BUDGET: string;
 
+  /**
+   * The git revision this Worker was built from, injected at deploy time by
+   * `npm run deploy`. Reported on `/api/health` so that "the code I am reading"
+   * and "the deployment I am measuring" can be shown to be the same thing —
+   * a review of one against the other is otherwise unfalsifiable.
+   */
+  GIT_REVISION?: string;
+
   // Secrets — absent in local dev and in CI. Every path degrades rather than
   // failing when these are unset.
   ANTHROPIC_API_KEY?: string;

@@ -10,9 +10,18 @@ steps offscreen, then rejoins with a recap whenever you come back.
 
 Precisely: absence never costs you attributes, skills, renown, items,
 conditions, your life, or access to anything, and there is no XP ladder to fall
-behind on. It does mean fewer entries in the chronicle than someone who played
-every week — story presence is the one thing engagement buys, and it buys
-nothing mechanical. See the spec for why that line is drawn where it is.
+behind on. Conditions actually *heal* while you are offscreen, because an
+injury preserved because you were busy is a penalty wearing a different coat.
+
+Standing still while others rise is one too, so it is also handled: when you
+come back, `restoreStanding` lifts your renown and your bonds to the **middle
+of the party** — never past it. You are not rewarded for being away and cannot
+overtake the people who showed up; you simply do not resume from behind.
+
+What showing up buys is *story*: the people who played are the ones the
+chronicle is about, permanently. That is the only asymmetry, it is deliberate,
+and it is worth nothing mechanically. See the spec for why the line is drawn
+there.
 
 Play from your inbox. A richer web interface is there if you want it.
 
@@ -26,9 +35,15 @@ escalate, settlements prosper and revolt, NPCs remember exactly how you treated
 them. All of it advances whether or not anyone shows up.
 
 The model does two schema-bounded jobs: turn what you typed into a typed
-action, and turn resolved events into prose. Any state change it proposes is
-validated against the sim's rules and **rejected if illegal**. It cannot invent
-a faction, resurrect a dead NPC, or move your party across the map.
+action, and turn resolved events into prose. **It is never asked for a state
+change at all** — there is no channel through which one could arrive. Its
+action output is one verb from a fixed enum plus a target the sim resolves
+against real entities, and its narration output is prose that is read, never
+written back. It cannot invent a faction, resurrect a dead NPC, or move your
+party across the map, because nothing it emits is a state edit.
+
+That is a stronger guarantee than validating proposed deltas and rejecting the
+illegal ones: there is no delta path to get wrong.
 
 That constraint is what buys coherence over months of play. The baron your
 party snubbed in tick 3 is a row with a grudge value, not a sentence in a
@@ -60,8 +75,8 @@ web/PWA  ──► Worker fetch()  ─┘   DO SQLite = canonical world state
                     1. sim drift            deterministic world advance → events
                     2. player actions       seeded dice vs sim rules → events
                     3. absence policy       auto-act │ offscreen
-                    4. LLM narrate          events + state → prose + deltas
-                    5. validate deltas      illegal → reject → templated fallback
+                    4. LLM narrate          events + state → prose (read, never written back)
+                    5. validate prose       unusable → templated fallback
                     6. project → D1         the queryable chronicle
                     7. fan out              email + web
 ```
@@ -127,10 +142,11 @@ on two consecutive cycles.
 
 | Gate | What it proves |
 |---|---|
-| `npm test` | 167 tests, including the absence promise and the world invariants |
+| `npm test` | 226 tests, including the absence promise and the world invariants |
 | `npm run sim:soak` | 1000+ deterministic ticks, invariants held, replay identical, state bounded |
-| `scripts/smoke.mjs` | 61 checks against production, most of them adversarial |
-| `scripts/ui-smoke.mjs` | 28 checks driving the real app at a mobile viewport, service workers blocked |
+| `npm run sim:endurance` | 4 players over 60 ticks — quorum and deadline resolution, absences of 1/3/30 turns, re-entry recaps, and the no-penalty promise asserted every turn |
+| `scripts/smoke.mjs` | 75 checks against production, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 34 checks driving the real app at a mobile viewport, service workers blocked |
 | `scripts/email-e2e.mjs` | 22 checks including a full round trip through real Cloudflare Email Routing |
 
 The email test is a genuine loop, not a simulation of one: the game mails a

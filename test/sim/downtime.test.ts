@@ -111,15 +111,42 @@ describe("downtime", () => {
       expect(state.characters[CHR]!.conditions).toEqual([]);
     });
 
-    it("renown gain is small and asymptotic, so grinding downtime cannot cap it", () => {
+    it("grinding downtime forever buys no standing at all", () => {
+      // This test used to assert that renown *rose* here, slowly. That blessed
+      // the exact defect the promise forbids: renown feeds `difficultyFor`, so
+      // an optional activity was an advantage, and skipping it was therefore a
+      // cost. A player with a spare ten minutes was buying an edge over one
+      // without. Downtime buys presence in the story and nothing else.
       const start = state.characters[CHR]!.renown;
       for (let i = 0; i < 500; i++) {
         state.tick = i;
         resolveDowntime(state, { characterId: CHR, kind: "train", detail: "", targetId: null }, new EventLog(i));
       }
-      const after = state.characters[CHR]!.renown;
-      expect(after).toBeGreaterThan(start);
-      expect(after).toBeLessThan(100);
+      expect(state.characters[CHR]!.renown).toBe(start);
+    });
+
+    it("no downtime activity touches a mechanically relevant field, ever", () => {
+      // The general form, so a future activity cannot quietly reintroduce this.
+      const npc = Object.values(state.npcs).find((n) => n.alive)!;
+      const before = {
+        renown: state.characters[CHR]!.renown,
+        attributes: { ...state.characters[CHR]!.attributes },
+        skills: { ...state.characters[CHR]!.skills },
+        bonds: { ...state.characters[CHR]!.bonds },
+        attitudes: { ...npc.attitudes },
+      };
+      for (const kind of ["craft", "research", "train", "network", "recover"] as const) {
+        for (let i = 0; i < 20; i++) {
+          state.tick = i;
+          resolveDowntime(state, { characterId: CHR, kind, detail: "", targetId: null }, new EventLog(i));
+        }
+      }
+      const after = state.characters[CHR]!;
+      expect(after.renown).toBe(before.renown);
+      expect(after.attributes).toEqual(before.attributes);
+      expect(after.skills).toEqual(before.skills);
+      expect(after.bonds).toEqual(before.bonds);
+      expect(npc.attitudes).toEqual(before.attitudes);
     });
   });
 
@@ -158,15 +185,20 @@ describe("downtime", () => {
       expect(Object.values(state.threats).some((t) => t.revealed)).toBe(true);
     });
 
-    it("network builds a mutual bond with a living NPC", () => {
+    it("network records who you spent time with, and changes no standing", () => {
       const npc = Object.values(state.npcs).find((n) => n.alive)!;
-      resolveDowntime(
+      const result = resolveDowntime(
         state,
         { characterId: CHR, kind: "network", detail: "", targetId: npc.id },
         new EventLog(1),
       );
-      expect(npc.attitudes[CHR]).toBeGreaterThan(0);
-      expect(state.characters[CHR]!.bonds[npc.id]).toBeGreaterThan(0);
+      expect(result.ok).toBe(true);
+      expect(result.outcome).toContain(npc.name);
+      // The relationship is a fact the narrator is told about, not a bonus.
+      // It moved both sides before, and `restoreStanding` could never undo the
+      // NPC's half — so a returning player stayed permanently behind.
+      expect(npc.attitudes[CHR] ?? 0).toBe(0);
+      expect(state.characters[CHR]!.bonds[npc.id] ?? 0).toBe(0);
     });
 
     it("network cannot befriend a dead NPC", () => {

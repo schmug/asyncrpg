@@ -61,6 +61,9 @@ $("signin-form").addEventListener("submit", async (event) => {
       body: JSON.stringify({ email }),
     });
     say(out.message, "ok");
+    // Email is the only way in, so "it never arrived" is a dead end unless we
+    // say what to do about it here, at the moment it starts not arriving.
+    $("signin-help").hidden = false;
   } catch (err) {
     say(err.message, "err");
   } finally {
@@ -140,7 +143,10 @@ function renderCampaign(data) {
   const c = data.campaign;
   currentSlug = c.slug;
   $("c-title").textContent = c.name;
-  $("c-where").textContent = `${c.place} — ${c.season} of year ${c.year}. ${c.situation}`;
+  // The situation already opens with the place and the season, so prefixing it
+  // with both again read as "Krauyaest — summer of year 81. Krauyaest in the
+  // summer of year 81. ..." on the live page.
+  $("c-where").textContent = c.situation;
 
   const clock = $("c-clock");
   clock.textContent = "";
@@ -215,6 +221,29 @@ function renderCampaign(data) {
     ? "The public chronicle is behind the campaign. The host can rebuild it."
     : "";
 
+  // A halted campaign is stopped on purpose and can be restarted. Say both
+  // parts — "stopped" alone reads as data loss, which it is not.
+  const haltBox = $("halt-box");
+  haltBox.hidden = !c.halted;
+  if (c.halted) {
+    $("c-halted").textContent =
+      `This campaign has stopped advancing: the last ${c.halted.consecutiveBlockedTicks} turns ` +
+      `could not be resolved without breaking the world's own rules, so it stopped retrying ` +
+      `rather than failing quietly. Nothing has been lost — every earlier turn is intact. ` +
+      (data.isHost ? "You can clear the pending actions and try again." : "The host can restart it.");
+    $("resume-btn").hidden = !data.isHost;
+  }
+
+  // If mail did not reach this player, say so where they will see it, and say
+  // the reassuring part too: the turn is not lost, it is on this page.
+  const maildown = $("c-maildown");
+  maildown.hidden = !data.mailUndelivered;
+  maildown.textContent = data.mailUndelivered
+    ? `We could not deliver your email for turn ${data.mailUndelivered.tick}. ` +
+      `Nothing was missed — the turn is above, and you can act right here. ` +
+      `If this keeps happening, check your spam folder and add dm@cortech.online to your contacts.`
+    : "";
+
   // Letters go to other players, so the recipient list is everyone but you.
   const to = $("letter-to");
   to.textContent = "";
@@ -229,6 +258,18 @@ function renderCampaign(data) {
 
   // Only the host can invite, so only the host is offered it.
   $("invite-box").hidden = !data.isHost;
+  if (data.isHost && c.pace) {
+    // Show what is actually set, so the host is editing rather than guessing.
+    $("pace-cadence").value = c.pace.cadence;
+    const options = [...$("pace-quorum").options];
+    const nearest = options.reduce((best, o) =>
+      Math.abs(Number(o.value) - c.pace.quorumFraction) <
+      Math.abs(Number(best.value) - c.pace.quorumFraction)
+        ? o
+        : best,
+    );
+    $("pace-quorum").value = nearest.value;
+  }
 
   $("c-chronicle").href = `/c/${encodeURIComponent(c.slug)}`;
   show("view-campaign");
@@ -338,6 +379,40 @@ $("back").addEventListener("click", () => {
 });
 
 // ─── invitations ───────────────────────────────────────────────────────────
+
+$("pace-form").addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = event.target.querySelector("button");
+  button.disabled = true;
+  try {
+    await api(`/api/campaigns/${encodeURIComponent(currentSlug)}/pace`, {
+      method: "POST",
+      body: JSON.stringify({
+        cadence: $("pace-cadence").value,
+        quorumFraction: Number($("pace-quorum").value),
+      }),
+    });
+    say("Pace updated.", "ok");
+    await load();
+  } catch (err) {
+    say(err.message, "err");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+$("resume-btn").addEventListener("click", async () => {
+  const button = $("resume-btn");
+  button.disabled = true;
+  try {
+    await api(`/api/campaigns/${encodeURIComponent(currentSlug)}/resume`, { method: "POST" });
+    await load();
+  } catch (err) {
+    $("c-halted").textContent = `Could not restart the campaign: ${err.message}`;
+  } finally {
+    button.disabled = false;
+  }
+});
 
 $("invite-btn").addEventListener("click", async () => {
   const button = $("invite-btn");

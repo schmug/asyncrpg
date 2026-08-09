@@ -115,7 +115,14 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
   const method = request.method.toUpperCase();
 
   if (path === "/api/health") {
-    return json({ ok: true, service: "asyncrpg", time: new Date().toISOString() });
+    return json({
+      ok: true,
+      service: "asyncrpg",
+      // "unknown" rather than an absent key: a deployment built without a
+      // revision and a deployment predating provenance are different problems.
+      revision: env.GIT_REVISION ?? "unknown",
+      time: new Date().toISOString(),
+    });
   }
 
   // ─── auth ──────────────────────────────────────────────────────────────
@@ -132,7 +139,35 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (email) {
       const playerId = await findOrCreatePlayer(env, email);
       const token = await mintLoginToken(env, playerId);
-      ctx.waitUntil(sendMagicLink(env, email, token).then(() => purgeExpiredTokens(env)));
+      ctx.waitUntil(
+        sendMagicLink(env, email, token)
+          .then(async (sent) => {
+            // Durable, not just a log line: an operator asked "why did my
+            // sign-in email never arrive?" and the honest answer required
+            // tailing the Worker at the exact moment. A row survives the
+            // moment. `campaign_id` is empty because sign-in precedes any
+            // campaign — this is an account-level delivery failure.
+            // Suppressed is not failed: the address is reserved and could
+            // never have received anything. Recording it would fill the table
+            // with the rate-limit probe's own traffic and bury real outages.
+            if (!sent.ok && !sent.suppressed) {
+              await env.DB.prepare(
+                `INSERT OR REPLACE INTO delivery_failures
+                   (id, campaign_id, player_id, tick, kind, detail, created_at)
+                 VALUES (?, '', ?, 0, 'signin', ?, ?)`,
+              )
+                .bind(
+                  `dlv_signin_${playerId}`,
+                  playerId,
+                  sent.error.slice(0, 300),
+                  new Date().toISOString(),
+                )
+                .run();
+            }
+          })
+          .catch((err) => console.error("sign-in bookkeeping failed", err))
+          .then(() => purgeExpiredTokens(env)),
+      );
     }
     return json({ ok: true, message: "If that address can sign in, a link is on its way." });
   }
@@ -186,7 +221,13 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (campaign.public_chronicle !== 1 && !(session && (await isMember(env, campaign.id, session.playerId)))) {
       return new Response("This chronicle is private.", { status: 403 });
     }
-    return renderChronicle(env, campaign);
+    // `?before=<tick>` pages backwards through the whole campaign. A plain
+    // query parameter and plain links, so the archive stays reachable with no
+    // JavaScript — which is the point of a chronicle you can still read years
+    // later.
+    const beforeRaw = url.searchParams.get("before");
+    const before = beforeRaw !== null && /^\d{1,9}$/.test(beforeRaw) ? Number(beforeRaw) : null;
+    return renderChronicle(env, campaign, before);
   }
 
   // ─── joining by invitation ─────────────────────────────────────────────
@@ -250,17 +291,50 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       .bind(id, slug, name, cadence, session.playerId, new Date().toISOString())
       .run();
 
+    // Creation spans four writes across two stores, and the order decides what
+    // a partial failure leaves behind. Membership is written *before* the clock
+    // starts: a campaign whose alarm is live but whose creator is not a member
+    // is one nobody can reach, act in, or repair — it just ticks. The reverse
+    // failure is harmless by comparison, so the risk is put there deliberately.
+    //
+    // Every step is idempotent on retry: the campaign row is keyed by id, DO
+    // init is a no-op once a world exists, `join` returns the existing
+    // character, and the membership insert ignores a conflict. So the client
+    // retrying a create that half-failed converges rather than duplicating.
     const campaign = stub(env, id);
-    await campaign.init({ campaignId: id, slug, name, cadence: cadence as "weekly" });
-    const joined = await campaign.join(session.playerId, session.displayName);
-    await env.DB.prepare(
-      `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
-       VALUES (?, ?, ?, ?, 'host', ?)`,
-    )
-      .bind(id, session.playerId, joined.characterId, joined.characterName, new Date().toISOString())
-      .run();
+    try {
+      await campaign.init({ campaignId: id, slug, name, cadence: cadence as "weekly" });
+      const joined = await campaign.join(session.playerId, session.displayName);
+      await env.DB.prepare(
+        `INSERT INTO memberships (campaign_id, player_id, character_id, character_name, role, joined_at)
+         VALUES (?, ?, ?, ?, 'host', ?)
+         ON CONFLICT(campaign_id, player_id) DO NOTHING`,
+      )
+        .bind(
+          id,
+          session.playerId,
+          joined.characterId,
+          joined.characterName,
+          new Date().toISOString(),
+        )
+        .run();
 
-    return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
+      // Only now does the campaign start advancing on its own.
+      await campaign.startClock();
+
+      return json({ ok: true, slug, campaignId: id, character: joined }, { status: 201 });
+    } catch (err) {
+      // Roll the D1 row back so the slug is free and the half-built campaign
+      // does not sit in the creator's list as something they cannot open.
+      // The DO may survive with a world and no clock; it is unreachable
+      // without the row, harmless, and reclaimed by reusing the slug.
+      console.error(`campaign creation failed for ${slug}; rolling back:`, err);
+      await env.DB.prepare("DELETE FROM campaigns WHERE id = ?")
+        .bind(id)
+        .run()
+        .catch(() => {});
+      return fail(500, "could not create that campaign — nothing was saved, try again");
+    }
   }
 
   const campaignMatch = /^\/api\/campaigns\/([a-z0-9-]{2,31})(\/[a-z]+)?$/.exec(path);
@@ -289,7 +363,7 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
     if (!member) return fail(403, "you are not in this campaign");
 
     if (!action && method === "GET") {
-      const [snapshot, prompt, sheet, latest, openFailures] = await Promise.all([
+      const [snapshot, prompt, sheet, latest, openFailures, undelivered] = await Promise.all([
         campaignStub.snapshot(),
         campaignStub.promptForPlayer(session.playerId),
         campaignStub.mySheet(session.playerId),
@@ -303,6 +377,12 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         )
           .bind(campaign.id)
           .first<{ n: number }>(),
+        env.DB.prepare(
+          `SELECT COUNT(*) AS n, MAX(tick) AS tick FROM delivery_failures
+           WHERE campaign_id = ? AND player_id = ? AND resolved_at IS NULL`,
+        )
+          .bind(campaign.id, session.playerId)
+          .first<{ n: number; tick: number | null }>(),
       ]);
       return json({
         campaign: { slug: campaign.slug, ...snapshot },
@@ -314,6 +394,11 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
         // Surfaced to the host so a chronicle drifting from canon is visible
         // rather than something only a log would ever show.
         chronicleNeedsRepair: (openFailures?.n ?? 0) > 0,
+        // Told to the player it happened to, not just the logs: "I never got
+        // my email" should have an answer in the app. The beat itself is
+        // above in `latestBeat`, so the turn is not lost — only the nudge was.
+        mailUndelivered:
+          (undelivered?.n ?? 0) > 0 ? { count: undelivered!.n, tick: undelivered!.tick } : null,
       });
     }
 
@@ -432,6 +517,44 @@ async function route(request: Request, env: Env, ctx: ExecutionContext): Promise
       return json({ ok: true, ...out });
     }
 
+    if (action === "/pace" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can change the pace");
+      }
+      const body = await readJson<{ cadence?: string; quorumFraction?: number }>(request);
+      if (body?.cadence !== undefined && !["daily", "weekly", "monthly"].includes(body.cadence)) {
+        return fail(400, "invalid cadence");
+      }
+      if (
+        body?.quorumFraction !== undefined &&
+        (typeof body.quorumFraction !== "number" ||
+          !Number.isFinite(body.quorumFraction) ||
+          body.quorumFraction <= 0 ||
+          body.quorumFraction > 1)
+      ) {
+        return fail(400, "quorum must be a fraction above 0 and at most 1");
+      }
+      const out = await campaignStub.setPace({
+        cadence: body?.cadence as "daily" | "weekly" | "monthly" | undefined,
+        quorumFraction: body?.quorumFraction,
+      });
+      // The projection carries cadence too, so the campaign list stays honest.
+      if (body?.cadence) {
+        await env.DB.prepare("UPDATE campaigns SET cadence = ? WHERE id = ?")
+          .bind(body.cadence, campaign.id)
+          .run();
+      }
+      return json({ ok: true, ...out });
+    }
+
+    if (action === "/resume" && method === "POST") {
+      if (campaign.created_by !== session.playerId) {
+        return fail(403, "only the host can resume a halted campaign");
+      }
+      const out = await campaignStub.resume();
+      return json({ ok: true, ...out });
+    }
+
     if (action === "/resolve" && method === "POST") {
       if (campaign.created_by !== session.playerId) return fail(403, "only the host can force a turn");
       const outcome = await campaignStub.resolveTick("manual");
@@ -452,8 +575,17 @@ export default {
     try {
       return harden(await route(request, env, ctx));
     } catch (err) {
-      console.error("unhandled", err);
-      return harden(fail(500, "something went wrong"));
+      // A generic 500 is untraceable: a smoke run records "status 500" and the
+      // log line that explains it cannot be tied to that request. Cycle 4's
+      // capture caught exactly one such failure, unreproducible afterwards and
+      // therefore undiagnosable. The id is echoed to the caller and logged with
+      // the error, so any recurrence names its own log line.
+      const id = crypto.randomUUID().slice(0, 8);
+      console.error(
+        `unhandled [${id}] ${request.method} ${new URL(request.url).pathname}:`,
+        err instanceof Error ? (err.stack ?? err.message) : String(err),
+      );
+      return harden(fail(500, `something went wrong (ref ${id})`));
     }
   },
 

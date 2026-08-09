@@ -8,9 +8,9 @@
  *      the HTML part. Narrative prose is untrusted content by definition.
  */
 
-import { shortCode } from "../auth";
 import type { Env } from "../env";
-import { buildSubject, INBOX_LOCAL } from "./parse";
+import { buildSubject, INBOX_LOCAL, isUndeliverable } from "./parse";
+import { mintReplyCode } from "./token";
 
 export function escapeHtml(value: string): string {
   return value
@@ -44,6 +44,8 @@ export interface BeatMail {
   prose: string;
   prompt: string;
   recap?: string[];
+  /** Offscreen players get a gentler sign-off — they are not being asked. */
+  offscreen?: boolean;
   /** Set when the DM acted for this player last tick, so we can say so plainly. */
   actedForYou?: string | null;
 }
@@ -52,9 +54,22 @@ export interface BeatMail {
  * Send one player their beat, and record the binding that lets their reply
  * resolve without them doing anything but hitting reply.
  */
-export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string } | null> {
+/** Why a beat did or did not reach its player — the reason matters downstream. */
+export type SendResult =
+  | { ok: true; code: string }
+  | { ok: false; error: string }
+  /** Not attempted: the address provably cannot receive mail. Not a failure. */
+  | { ok: false; suppressed: true; code: string; error: string };
+
+export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   const domain = env.MAIL_DOMAIN;
-  const code = shortCode();
+  // The reply capability for exactly this (campaign, player, tick). See
+  // ./token.ts for why it rides the subject line rather than the Reply-To.
+  const code = await mintReplyCode(env.EMAIL_TOKEN_SECRET, {
+    campaignId: mail.campaignId,
+    playerId: mail.playerId,
+    tick: mail.tick,
+  });
   const id = messageId(domain);
   const replyTo = `${INBOX_LOCAL}@${domain}`;
   const subject = buildSubject(mail.campaignName, mail.tick, code, mail.headline);
@@ -70,7 +85,9 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
   const text =
     `${mail.prose}${recapText}${autoText}\n\n` +
     `— ${mail.prompt}\n\n` +
-    `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n` +
+    (mail.offscreen
+      ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.\n`
+      : `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n`) +
     `Chronicle: ${chronicle}\n`;
 
   const html =
@@ -88,18 +105,31 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
     `<hr style="border:0;border-top:1px solid #ddd8cf;margin:1.6em 0">` +
     `<p style="margin:0 0 .6em;font-weight:600">${escapeHtml(mail.prompt)}</p>` +
     `<p style="margin:0 0 1em;color:#6b6459;font-size:.9em">` +
-    `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>` +
+    (mail.offscreen
+      ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.</p>`
+      : `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>`) +
     `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
     `</div>`;
 
   let assignedMessageId: string | null = null;
   let lastError: unknown = null;
 
+  // Never hand a guaranteed hard bounce to the provider. The binding is still
+  // written below — reply authentication is about identity, not delivery, and
+  // a suppressed send should not silently disable the reply path for a test
+  // campaign or leave a gap the smoke suite reads as a regression.
+  const suppressed = isUndeliverable(mail.toEmail);
+  if (suppressed) {
+    console.log(
+      `send suppressed for undeliverable address campaign=${mail.campaignId} tick=${mail.tick}`,
+    );
+  }
+
   // One retry. Most send failures are transient (rate limit, upstream blip),
   // and the beat is the product's primary channel — dropping it on the first
   // stumble loses a player their turn. A second failure is logged and the
   // player still has the web copy.
-  for (let attempt = 0; attempt < 2; attempt++) {
+  for (let attempt = 0; attempt < 2 && !suppressed; attempt++) {
   try {
     // Cloudflare Email Sending rejects a caller-supplied `Message-ID`
     // ("Only whitelisted headers and X-* headers are accepted"), so the
@@ -139,10 +169,14 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
       `email send failed after retry campaign=${mail.campaignId} tick=${mail.tick} player=${mail.playerId}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return null;
+    // Hand the reason back rather than a bare null. "Quota exceeded" and "the
+    // provider is down" need completely different responses, and a delivery
+    // record that cannot tell them apart is a record of the wrong thing.
+    // Never thrown: a delivery failure must not stop a tick resolving.
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
   }
-  if (lastError) return null;
+  if (lastError) return { ok: false, error: String(lastError) };
 
   try {
     await env.DB.prepare(
@@ -173,13 +207,27 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<{ code: string
       `reply binding insert failed campaign=${mail.campaignId} tick=${mail.tick}:`,
       err instanceof Error ? err.message : String(err),
     );
-    return { code };
+    return suppressed
+      ? { ok: false, suppressed: true, code, error: "address cannot receive mail" }
+      : { ok: true, code };
   }
-  return { code };
+  return suppressed
+    ? { ok: false, suppressed: true, code, error: "address cannot receive mail" }
+    : { ok: true, code };
 }
 
-export async function sendMagicLink(env: Env, toEmail: string, token: string): Promise<boolean> {
+export async function sendMagicLink(
+  env: Env,
+  toEmail: string,
+  token: string,
+): Promise<{ ok: true } | { ok: false; error: string; suppressed?: true }> {
   const url = `${env.PUBLIC_ORIGIN}/auth/callback?t=${encodeURIComponent(token)}`;
+  if (isUndeliverable(toEmail)) {
+    // Same guard as the beat path. A sign-in attempt at a reserved domain is
+    // almost always a typo or a test, and either way it is a certain bounce.
+    console.log("magic link suppressed for an address that cannot receive mail");
+    return { ok: false, error: "address cannot receive mail", suppressed: true };
+  }
   try {
     await env.EMAIL.send({
       to: toEmail,
@@ -192,8 +240,22 @@ export async function sendMagicLink(env: Env, toEmail: string, token: string): P
         `<p style="color:#6b6459;font-size:.9em">This link works once and expires in 20 minutes. ` +
         `If you didn't ask for it, ignore this email.</p></div>`,
     });
-    return true;
-  } catch {
-    return false;
+    return { ok: true };
+  } catch (err) {
+    // This used to be a bare `catch { return false }`, and that made the one
+    // path a brand-new user depends on the only one that could fail in total
+    // silence. `/api/auth/request` deliberately answers 200 whatever happens,
+    // so nobody can use it to discover which addresses have accounts — which
+    // means a swallowed error here is invisible from both ends at once: the
+    // person sees "a link is on its way" and the operator sees a clean 200.
+    //
+    // Reported for real on 2026-08-03: a sign-in that produced no email and no
+    // log line anywhere. Anti-enumeration is about what the *response* says,
+    // not about what we are allowed to know.
+    console.error(
+      `magic link send failed for ${toEmail.replace(/^(.).*(@.*)$/, "$1***$2")}:`,
+      err instanceof Error ? err.message : String(err),
+    );
+    return { ok: false, error: err instanceof Error ? err.message : String(err) };
   }
 }

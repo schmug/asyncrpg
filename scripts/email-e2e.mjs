@@ -95,6 +95,9 @@ function cleanup() {
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM email_loopback WHERE to_address LIKE '%rpgloop%' OR from_address LIKE '%rpgloop%';` +
         `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%');` +
+        `DELETE FROM inbound_log WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%';`,
     );
@@ -204,8 +207,14 @@ async function main() {
     bindings[0]?.code ?? "none",
   );
   check(
+    // Per (player, tick), not per player: a binding is minted for every player
+    // on every beat, so a second tick resolving while this test runs — a
+    // deadline firing, another suite forcing one — legitimately produces more
+    // rows for the same player. Asserting one row per player made this fail
+    // for a reason that had nothing to do with the property being tested.
     "bindings are per-player, not shared",
-    new Set(bindings.map((b) => b.player_id)).size === bindings.length,
+    new Set(bindings.map((b) => `${b.player_id}@${b.tick}`)).size === bindings.length,
+    `${bindings.length} rows across ${new Set(bindings.map((b) => b.tick)).size} tick(s)`,
   );
   check(
     "bindings are addressed to the members of this campaign",
@@ -323,17 +332,35 @@ async function main() {
 
   // The reply travels back through Email Routing into email(), where normal
   // inbound handling submits it. Its arrival is what proves the inbound hop.
+  // Two real SMTP deliveries have to complete inside this window, and provider
+  // latency is not ours to control — a 180s budget produced an intermittent
+  // failure that looked like a product blocker and passed on the next run.
   const landed = await waitFor(
     "inbound action landed",
     `SELECT event_id, summary FROM events
      WHERE campaign_id='${esc(loopId)}' AND kind='player_action'
        AND summary LIKE '%first light%'`,
+    300_000,
   );
-  check(
-    "a reply sent by real email became a turn in the campaign",
-    landed.length > 0,
-    landed[0]?.summary?.slice(0, 80) ?? "the reply never reached the handler",
-  );
+
+  // When it does fail, say *which* failure it was. "Never reached the handler"
+  // was previously the only available answer, and it is the one thing the
+  // evidence could not actually establish.
+  let diagnosis = landed[0]?.summary?.slice(0, 80) ?? "";
+  if (landed.length === 0) {
+    const seen = d1Rows(
+      `SELECT disposition, reason, created_at FROM inbound_log
+       WHERE created_at > '${new Date(before).toISOString()}'
+       ORDER BY created_at DESC LIMIT 5`,
+    );
+    diagnosis = seen.length
+      ? `handler saw it and decided: ${seen
+          .map((r) => `${r.disposition}(${r.reason})`)
+          .join("; ")}`
+      : "no inbound_log entry — Email Routing never delivered it to the Worker " +
+        "(routing rule, DMARC rejection upstream, or still in flight)";
+  }
+  check("a reply sent by real email became a turn in the campaign", landed.length > 0, diagnosis);
 
   console.log("\nSTILL NOT COVERED: deliverability to third-party mailboxes (Gmail, Outlook)");
   console.log("  and their spam handling — that needs seed-list testing, not a self-test.");

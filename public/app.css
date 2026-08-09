@@ -158,6 +158,29 @@ button.primary[disabled] { opacity: 0.55; cursor: progress; }
 .status.err { color: #a3341f; }
 @media (prefers-color-scheme: dark) { .status.err { color: #f0917a; } }
 .status.ok { color: var(--ok); }
+/* Something needs saying but nothing is broken for the player — mail that did
+   not arrive while the turn itself is safely on the page. */
+.status.warn { color: #8a5a12; }
+@media (prefers-color-scheme: dark) { .status.warn { color: #e0b464; } }
+
+/* First-run orientation. Collapsed by default so it never gets between a
+   returning player and the thing they came to do. */
+#signin-help { margin: 1.6rem 0 0; padding-top: 0.6rem; border-top: 1px solid var(--rule); }
+#signin-help h2 { font-size: 1rem; margin: 0.8rem 0 0.5rem; }
+
+#how-it-works { margin: 0 0 1.4rem; }
+#how-it-works > summary {
+  cursor: pointer;
+  font: 600 0.9rem/1.5 system-ui, sans-serif;
+  color: var(--accent);
+  padding: 0.6rem 0;
+  min-height: 2.75rem;
+  display: flex;
+  align-items: center;
+}
+ol.how { margin: 0.2rem 0 0.6rem; padding-left: 1.3rem; display: grid; gap: 0.6rem; }
+ol.how li { font-size: 0.92rem; line-height: 1.55; color: var(--muted); }
+ol.how strong { color: var(--ink); font-weight: 600; }
 
 .list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.7rem; }
 .list li {
@@ -199,6 +222,14 @@ summary {
   min-height: 44px;
   display: flex;
   align-items: center;
+  /* A disclosure control is a button, not prose. Without this, tapping one
+     selects its label, and the browser's blue selection band sat across
+     "Your character" in every captured screenshot — a jarring mismatch
+     against the whole warm palette, and an artifact of the tap rather than
+     anything the page meant to show. */
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-tap-highlight-color: transparent;
 }
 
 .chronlink { display: inline-block; margin-top: 1.5rem; color: var(--accent); min-height: 44px; }
