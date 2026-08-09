@@ -1,0 +1,16 @@
+-- `WorldEvent.targetIds` carries *who an event happened to*. For many event
+-- kinds it is the only link to the entity, because `actor_id` is null — a
+-- prosperity shift names the settlement as a target and has no actor at all.
+--
+-- It was populated throughout the sim from the beginning but never projected,
+-- so the read model could answer "what did X do" and not "what happened to X".
+-- Issue #7.
+--
+-- APPLY THIS BEFORE DEPLOYING THE `#writeEvents` CHANGE IT PAIRS WITH.
+-- `wrangler deploy` does not apply D1 migrations, and neither does CI — this
+-- must be run by hand (`wrangler d1 migrations apply`) first. `#writeEvents`
+-- swallows D1 failures into `#recordProjectionFailure` by design (a D1 blip
+-- must not wedge a tick), so a deploy that lands before this migration does
+-- not error — it silently stops projecting every event of every tick while
+-- dashboards stay green. See docs/HANDOFF.md.
+ALTER TABLE events ADD COLUMN target_ids TEXT NOT NULL DEFAULT '[]';

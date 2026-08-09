@@ -24,6 +24,7 @@ import { promptFor } from "./dm/fallback";
 import type { Beat, BudgetGuard, DmConfig } from "./dm/narrate";
 import { sendBeat } from "./email/outbound";
 import type { Env } from "./env";
+import { scanProse } from "./lore/mentions";
 import type { PlayerAction, WorldEvent, WorldState } from "./sim/types";
 
 interface PendingRow extends Record<string, SqlStorageValue> {
@@ -728,6 +729,10 @@ export class CampaignDO extends DurableObject<Env> {
       beat.prose.split("\n").find((l) => l.trim().length > 0)?.slice(0, 70) ??
       `${state.season} of year ${state.year}`;
 
+    // Every member gets the same prose, so scan once per tick rather than once
+    // per player. Pure and cheap, but there is no reason to do it N times.
+    const scan = scanProse(beat.prose, state);
+
     for (const member of members.results ?? []) {
       const character = Object.values(state.characters).find((c) => c.playerId === member.player_id);
       if (!character) continue;
@@ -759,6 +764,7 @@ export class CampaignDO extends DurableObject<Env> {
             : promptFor(character, state),
         recap: result.recaps[character.id],
         actedForYou: auto ? auto.action.intent : null,
+        scan,
         offscreen: character.presence === "offscreen",
       });
 
@@ -848,9 +854,19 @@ export class CampaignDO extends DurableObject<Env> {
     if (events.length === 0) return;
     const now = new Date().toISOString();
     const stmt = this.env.DB.prepare(
-      `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id, summary, significance, data, created_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-       ON CONFLICT(campaign_id, event_id) DO NOTHING`,
+      // `DO NOTHING` was correct while events were append-only-immutable — an
+      // id could only be re-seen on a harmless replay of the same insert.
+      // `target_ids` breaks that premise: rows written before this fix are
+      // already in D1 with target_ids='[]', so the row every backfill needs
+      // to touch is exactly the row that already exists. `DO NOTHING` would
+      // make reproject() a no-op for the one column it exists to repair, so
+      // the upsert widens to that column only — summary, significance, and
+      // data stay immutable, matching #writeEntities below (~L668), which
+      // already uses DO UPDATE SET for the same reason: its rows are
+      // expected to change on replay.
+      `INSERT INTO events (campaign_id, event_id, tick, kind, actor_id, region_id, summary, significance, target_ids, data, created_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(campaign_id, event_id) DO UPDATE SET target_ids = excluded.target_ids`,
     );
     try {
       // D1 batches are capped; chunk so a busy genesis does not exceed it.
@@ -866,6 +882,9 @@ export class CampaignDO extends DurableObject<Env> {
               e.regionId,
               e.summary,
               e.significance,
+              // Top-level on WorldEvent, not part of `data` — easy to miss, and
+              // missing it is exactly what issue #7 was.
+              JSON.stringify(e.targetIds ?? []),
               JSON.stringify(e.data),
               now,
             ),

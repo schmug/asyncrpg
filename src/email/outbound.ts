@@ -9,6 +9,7 @@
  */
 
 import type { Env } from "../env";
+import { dossierPath, type Mention, type MentionScan, type Segment } from "../lore/mentions";
 import { buildSubject, INBOX_LOCAL, isUndeliverable } from "./parse";
 import { mintReplyCode } from "./token";
 
@@ -21,11 +22,106 @@ export function escapeHtml(value: string): string {
     .replace(/'/g, "&#39;");
 }
 
-function paragraphs(text: string): string {
-  return text
+/**
+ * A faint underline reads as *reference*; a coloured link reads as *call to
+ * action*, and the only call to action in a beat is "reply". The accent
+ * "Read the chronicle" link stays the one loud link in the message.
+ *
+ * The colour is restated here rather than inherited from the wrapping `<div>`,
+ * even though it is the same value. Outlook desktop renders mail through Word,
+ * which ignores `color:inherit` — mention anchors would fall back to default
+ * hyperlink blue there, up to eight of them, which is precisely the
+ * link-density look the cap of `MAX_MENTIONS` exists to avoid. The two
+ * `text-decoration-*` properties are unsupported by Word as well, but they
+ * degrade to a plain underline, which is the intended effect anyway.
+ */
+const LINK_STYLE =
+  "color:#1c1a17;text-decoration:underline;text-decoration-color:#c9b9a5;text-underline-offset:2px";
+
+/**
+ * Escape each segment on its own, then join.
+ *
+ * Tokenizing happens on raw prose (see `scanProse`), so a match can never
+ * straddle an escape sequence and nothing is escaped twice.
+ */
+function renderSegments(segments: Segment[], slug: string, origin: string): string {
+  return segments
+    .map((s) => {
+      const escaped = escapeHtml(s.value);
+      if (s.type === "text") return escaped;
+      const href = escapeHtml(`${origin}${dossierPath(slug, s.mention.id)}`);
+      return `<a href="${href}" style="${LINK_STYLE}">${escaped}</a>`;
+    })
+    .join("");
+}
+
+/**
+ * Assemble the linked body first, split it into paragraphs after.
+ *
+ * That order is safe only because an anchor can never contain a newline, and
+ * that is a guarantee this module does not establish for itself: `candidates()`
+ * in `src/lore/mentions.ts` refuses to make a name containing a line break
+ * linkable (see `LINE_BREAK` there), so no mention segment can span a `\n{2,}`
+ * boundary. Without that rule an entity named "Ashen\n\nCoil" splits into
+ * `<p>Then <a …>Ashen</p><p>Coil</a> arrived.</p>` — the value is still
+ * escaped, but the nesting is broken. If that rule is ever relaxed, this
+ * function has to split first and re-derive segment offsets per paragraph.
+ *
+ * `segments` is null when the caller supplied no scan, and empty when the scan
+ * found nothing to split (empty prose). Both fall back to escaping `text`
+ * whole, which is byte-for-byte what a single text segment produces, so all
+ * three routes render the same bytes.
+ */
+function paragraphs(
+  text: string,
+  segments: Segment[] | null,
+  slug: string,
+  origin: string,
+): string {
+  const body = segments?.length ? renderSegments(segments, slug, origin) : escapeHtml(text);
+  return body
     .split(/\n{2,}/)
-    .map((p) => `<p style="margin:0 0 1em">${escapeHtml(p).replace(/\n/g, "<br>")}</p>`)
+    .map((p) => `<p style="margin:0 0 1em">${p.replace(/\n/g, "<br>")}</p>`)
     .join("\n");
+}
+
+/**
+ * The plain-text who's-who. Same list, same order as the HTML one — a
+ * text-only reader gets the identical affordance, spelled out as URLs.
+ *
+ * An empty blurb loses the dash with it: `blurbFor` answers "" for a malformed
+ * row, and a dangling " — " reads as a rendering bug to the one person who
+ * would notice.
+ */
+function whosWhoText(mentions: Mention[], slug: string, origin: string): string {
+  if (!mentions.length) return "";
+  const lines = mentions
+    .map(
+      (m) =>
+        `  · ${m.name}${m.blurb ? ` — ${m.blurb}` : ""}\n    ${origin}${dossierPath(slug, m.id)}`,
+    )
+    .join("\n");
+  return `\nWho's who in this turn:\n${lines}\n`;
+}
+
+function whosWhoHtml(mentions: Mention[], slug: string, origin: string): string {
+  if (!mentions.length) return "";
+  return (
+    `<p style="margin:1.6em 0 .4em;font-weight:600;font-size:.85em">Who's who in this turn</p>` +
+    `<ul style="margin:0 0 1em;padding-left:1.2em;font-size:.85em;color:#6b6459">` +
+    mentions
+      .map((m) => {
+        const href = escapeHtml(`${origin}${dossierPath(slug, m.id)}`);
+        return (
+          `<li style="margin:0 0 .3em">` +
+          `<a href="${href}" style="color:#8a4b2a">${escapeHtml(m.name)}</a>` +
+          (m.blurb ? ` — ${escapeHtml(m.blurb)}` : "") +
+          `</li>`
+        );
+      })
+      .join("") +
+    `</ul>`
+  );
 }
 
 function messageId(domain: string): string {
@@ -48,6 +144,12 @@ export interface BeatMail {
   offscreen?: boolean;
   /** Set when the DM acted for this player last tick, so we can say so plainly. */
   actedForYou?: string | null;
+  /**
+   * Entities named in this beat, and the prose pre-split around them.
+   * Optional: when absent the mail renders exactly as it did before linking
+   * existed, which is what makes the zero-mention path provably unchanged.
+   */
+  scan?: MentionScan;
 }
 
 /**
@@ -74,6 +176,8 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
   const replyTo = `${INBOX_LOCAL}@${domain}`;
   const subject = buildSubject(mail.campaignName, mail.tick, code, mail.headline);
   const chronicle = `${env.PUBLIC_ORIGIN}/c/${encodeURIComponent(mail.campaignSlug)}`;
+  const mentions = mail.scan?.mentions ?? [];
+  const origin = env.PUBLIC_ORIGIN;
 
   const recapText = mail.recap?.length
     ? `\n\nWhile you were away:\n${mail.recap.map((r) => `  · ${r}`).join("\n")}`
@@ -88,11 +192,14 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
     (mail.offscreen
       ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.\n`
       : `Just reply to this email. Reply whenever suits you; nothing bad happens if you don't.\n`) +
-    `Chronicle: ${chronicle}\n`;
+    `Chronicle: ${chronicle}\n` +
+    // Below the prompt and the reply line in both parts, so the who's-who never
+    // competes with the call to action.
+    whosWhoText(mentions, mail.campaignSlug, origin);
 
   const html =
     `<div style="font:16px/1.6 Georgia,serif;max-width:34em;margin:0 auto;color:#1c1a17">` +
-    paragraphs(mail.prose) +
+    paragraphs(mail.prose, mail.scan?.segments ?? null, mail.campaignSlug, origin) +
     (mail.recap?.length
       ? `<p style="margin:1.5em 0 .4em;font-weight:600">While you were away</p><ul style="margin:0 0 1em;padding-left:1.2em">` +
         mail.recap.map((r) => `<li>${escapeHtml(r)}</li>`).join("") +
@@ -109,6 +216,7 @@ export async function sendBeat(env: Env, mail: BeatMail): Promise<SendResult> {
       ? `Reply whenever you want to pick it back up. There is no hurry and nothing to catch up on.</p>`
       : `Just reply to this email. Reply whenever suits you — nothing bad happens if you don't.</p>`) +
     `<p style="margin:0;font-size:.85em"><a href="${escapeHtml(chronicle)}" style="color:#8a4b2a">Read the chronicle</a></p>` +
+    whosWhoHtml(mentions, mail.campaignSlug, origin) +
     `</div>`;
 
   let assignedMessageId: string | null = null;
