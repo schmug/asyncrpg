@@ -81,6 +81,27 @@ web/PWA  ──► Worker fetch()  ─┘   DO SQLite = canonical world state
                     7. fan out                 email + web
 ```
 
+> **Implementation note (2026-08-08):** steps 4 and 5 above are the design as
+> first written, and §2's implementation note already supersedes them: there is
+> **no delta channel**, so there is nothing to validate. What shipped is:
+>
+> ```
+>                     4. LLM narrate             events + state → prose + one
+>                                                bounded scene line, and nothing
+>                                                that is written to world state
+>                     5. project → D1            the queryable chronicle
+>                     6. hold for review         only if the campaign has a DM
+>                     7. fan out                 email + web
+> ```
+>
+> The narrator's schema is exactly `{ prose, situation }`; output that is empty,
+> mangled, or over budget falls through to deterministic templated prose built
+> from the same events, so a tick always resolves. Step 6 is the human DM
+> review window added by
+> [`2026-08-08-dm-role-design.md`](./2026-08-08-dm-role-design.md); it moves
+> nothing, because canon has already advanced and the beat is already written by
+> the time it runs. Campaigns with no DM skip it entirely.
+
 ### Storage split
 
 | Store | Holds | Why |
@@ -111,6 +132,31 @@ first. An eager group moves fast; a slow group still moves.
   It never silently stops moving. See §8.
 
 ## 5. Absence — the no-penalty promise
+
+> **Implementation note (2026-08-08):** this section's promise was written when
+> the simulation was the only thing that could write canon. The human DM role
+> specified in [`2026-08-08-dm-role-design.md`](./2026-08-08-dm-role-design.md)
+> adds a second, bounded write path, so the promise splits. It is restated —
+> more precisely, not more weakly — as:
+>
+> > The **simulation** never penalizes absence — never, for any length of
+> > absence, costs you attributes, skills, renown, items, conditions, your life,
+> > or access to anything. That is enforced by tests and proven by a 1500-tick
+> > soak.
+> >
+> > A **human DM** has full authority over canon, and every edit they make is
+> > recorded and attributed in the chronicle. Campaigns with no DM — and
+> > campaigns whose DM edits nothing — get the promise absolutely.
+>
+> Everything below this note is the simulation-side promise, and it is unchanged
+> and still enforced. `sim:soak` runs with zero DM ops, so it goes on proving
+> exactly what it proved before.
+>
+> Slice 1 of the DM role — the seat, the review window, and prose editing — is
+> the only part built. It touches world state not at all, so **as of this note
+> every campaign gets the promise absolutely**, DM or no DM. The typed canon ops
+> of §5 of that spec, which are what would make a DM's authority real, are
+> specified and unbuilt.
 
 | Missed ticks | Behavior |
 |---|---|
@@ -298,6 +344,7 @@ actually matters, and is weaker than the one this section used to make.
 
 | Failure | Behavior |
 |---|---|
+| LLM emits invalid delta | ~~retry once with the validation error appended; then fall back to templated prose generated directly from sim events~~ — **cannot happen: there is no delta channel** (see §2). The equivalent live failure is unusable *prose*, which falls straight through to the templated path below |
 | LLM output unusable (spliced, truncated, fenced) | fall back to templated prose generated directly from sim events; tick still advances |
 | LLM unreachable / budget exceeded | same templated fallback; tick still advances |
 | Email send fails | retried, then recorded in `delivery_failures` and shown to the player it was owed to; the beat remains readable on the web |

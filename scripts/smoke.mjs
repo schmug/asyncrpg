@@ -11,15 +11,150 @@
  * than through a test-only endpoint, so production ships no auth backdoor.
  * Every row it creates uses the SMOKE_PREFIX and is deleted at the end.
  *
- * Usage: node scripts/smoke.mjs [baseUrl] [--keep]
+ * Usage: node scripts/smoke.mjs [baseUrl] [--local|--remote] [--keep]
+ *        npm run smoke:local   # local worker + local D1
+ *        npm run smoke:prod    # production + remote D1
+ *
+ * The suite has two halves — the HTTP base URL and the D1 database it seeds
+ * sessions into — and they must name the same deployment. So there is only
+ * one input: **the D1 target is derived from the base URL's host.** Loopback
+ * means the local D1; anything else means the deployed one. A `--local` or
+ * `--remote` that contradicts the URL is fatal rather than a silent winner.
+ *
+ * The failure that shape exists to prevent: with the D1 target read off the
+ * flag alone, `node scripts/smoke.mjs http://localhost:8788` — a flagless
+ * localhost run, which is what every runbook in this repo tells you to type —
+ * seeded players and live session tokens into the *production* database,
+ * failed every authenticated check, and then ran fourteen DELETEs against it.
+ *
+ * A run naming no target at all is fatal too, and that is not pedantry:
+ * `npm run smoke --local` hands this script nothing. npm parses `--local` as
+ * one of its own config flags, and it survives neither in argv nor in the
+ * environment, so a no-argument run is indistinguishable from a correctly
+ * spelled request for the local suite. Defaulting it to production would run
+ * the whole adversarial suite against the live game on a user who typed the
+ * right thing. `npm run smoke:local` is the npm-safe spelling.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
+import { fileURLToPath } from "node:url";
+import { dirname, resolve } from "node:path";
 import { resolveMx, resolveTxt } from "node:dns/promises";
 
-const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
-const KEEP = process.argv.includes("--keep");
+// `wrangler --local` reads its D1 out of `.wrangler/` *relative to the working
+// directory*, so a run started from anywhere but the repo root would seed a
+// different (empty) database than the one `wrangler dev` is serving, and every
+// authenticated check would fail with a misleading 401. Pin it to the repo.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
+
+const KNOWN_FLAGS = new Set(["--keep", "--local", "--remote"]);
+const argv = process.argv.slice(2);
+const flags = argv.filter((a) => a.startsWith("-"));
+const positional = argv.filter((a) => !a.startsWith("-"));
+
+// An unrecognised flag is fatal rather than ignored. The one thing this script
+// must never do is silently fall back to production because `--local` was
+// mistyped — `--Local`, `--loc`, or `-local` would otherwise parse as "no
+// flags given", i.e. `--remote`, and run the whole adversarial suite against
+// the live game.
+const unknown = flags.filter((f) => !KNOWN_FLAGS.has(f));
+if (unknown.length > 0) {
+  console.error(`unknown flag(s): ${unknown.join(", ")}`);
+  console.error("usage: node scripts/smoke.mjs [baseUrl] [--local|--remote] [--keep]");
+  process.exit(2);
+}
+if (flags.includes("--local") && flags.includes("--remote")) {
+  console.error("--local and --remote are mutually exclusive");
+  process.exit(2);
+}
+if (positional.length > 1) {
+  console.error(`expected at most one base URL, got: ${positional.join(", ")}`);
+  process.exit(2);
+}
+
+const PROD_BASE = "https://play.cortech.online";
+const LOCAL_BASE = "http://localhost:8788";
+const USAGE =
+  "usage: node scripts/smoke.mjs [baseUrl] [--local|--remote] [--keep]\n" +
+  `       npm run smoke:local          # ${LOCAL_BASE} + local D1\n` +
+  `       npm run smoke:prod           # ${PROD_BASE} + remote D1`;
+
+const wantsLocal = flags.includes("--local");
+const wantsRemote = flags.includes("--remote");
+const KEEP = flags.includes("--keep");
+
+// No target named at all. Refusing is the whole point: `npm run smoke --local`
+// arrives here as a bare `node scripts/smoke.mjs`, because npm eats `--local`
+// as its own config flag and leaves no trace of it in argv or the environment.
+// If a no-argument run defaulted to production, that user — who spelled the
+// flag correctly — would get the full adversarial suite, and its seeding and
+// its cleanup DELETEs, pointed at the live game.
+if (positional.length === 0 && !wantsLocal && !wantsRemote) {
+  console.error("refusing to guess a target: name a base URL, or pass --local or --remote.");
+  console.error("");
+  console.error("if you meant `npm run smoke --local`: npm consumed that flag before this");
+  console.error("script could see it. use `npm run smoke:local`, or `npm run smoke -- --local`.");
+  console.error("");
+  console.error(USAGE);
+  process.exit(2);
+}
+
+const BASE_RAW = positional[0] ?? (wantsLocal ? LOCAL_BASE : PROD_BASE);
+let baseUrl;
+try {
+  baseUrl = new URL(BASE_RAW);
+} catch {
+  console.error(`not a URL: ${JSON.stringify(BASE_RAW)}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+// `new URL("localhost:8791")` parses — as protocol `localhost:` with an empty
+// host, which would read as "not loopback" and therefore as production. The
+// scheme is required so that the host this script tests against is the host it
+// picked its database from.
+if (baseUrl.protocol !== "http:" && baseUrl.protocol !== "https:") {
+  console.error(`base URL must start with http:// or https://, got: ${BASE_RAW}`);
+  console.error(USAGE);
+  process.exit(2);
+}
+// `http://localhost@example.com/` has a host of example.com and reads, to a
+// human, as localhost. The database is chosen off the host, so a URL whose host
+// is not the part a reader would point at is refused rather than resolved.
+if (baseUrl.username || baseUrl.password) {
+  console.error(`base URL must not carry credentials: ${BASE_RAW}`);
+  console.error(`(its host is ${baseUrl.hostname}, and the host is what picks the database)`);
+  process.exit(2);
+}
+
+const BASE = baseUrl.href.replace(/\/$/, "");
+const host = baseUrl.hostname.toLowerCase();
+// `URL.hostname` keeps the brackets on an IPv6 literal, so `[::1]` is matched
+// as written. `*.localhost` resolves to loopback by RFC 6761 and `wrangler
+// dev` is routinely reached that way.
+const LOCAL =
+  /^(localhost|127(\.\d{1,3}){3}|0\.0\.0\.0|\[::1\])$/.test(host) || host.endsWith(".localhost");
+
+// A flag that disagrees with the URL is a fatal error, never an override. One
+// of these two directions is the bug this whole block exists to stop, and the
+// other is a run whose two halves point at different deployments; neither has
+// a sensible interpretation worth guessing at.
+if (wantsRemote && LOCAL) {
+  console.error(`--remote was given, but ${BASE} is a loopback address.`);
+  console.error("that combination would seed the LIVE database for a worker running on this");
+  console.error("machine. drop --remote to smoke the local worker, or name the production URL.");
+  process.exit(2);
+}
+if (wantsLocal && !LOCAL) {
+  console.error(`--local was given, but ${BASE} is not a loopback address.`);
+  console.error("that combination would seed a local database for a deployed worker, and every");
+  console.error("authenticated check would fail for a reason that has nothing to do with the code.");
+  process.exit(2);
+}
+
+// Derived from the URL alone — there is no path by which this can name a
+// different deployment than the one BASE points at.
+const D1_TARGET = LOCAL ? "--local" : "--remote";
 const SMOKE_PREFIX = "zzsmoke";
 const stamp = randomBytes(4).toString("hex");
 
@@ -33,17 +168,6 @@ function check(name, ok, detail = "") {
   console.log(`  [${mark}] ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
-/**
- * A local dev server is backed by the local D1, not the deployed one.
- *
- * The flag has to follow the target or the suite is worse than broken: seeding
- * a session in the remote database and then handing that cookie to
- * `wrangler dev` authenticates nobody, and every signed-in check fails for a
- * reason that has nothing to do with the app — while the rows, and the
- * cleanup's DELETEs, land in production.
- */
-const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE);
-
 function d1Rows(sql) {
   try {
     return JSON.parse(d1(sql))[0]?.results ?? [];
@@ -55,17 +179,8 @@ function d1Rows(sql) {
 function d1(sql) {
   return execFileSync(
     "npx",
-    [
-      "wrangler",
-      "d1",
-      "execute",
-      "asyncrpg",
-      LOCAL ? "--local" : "--remote",
-      "--json",
-      "--command",
-      sql,
-    ],
-    { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
+    ["wrangler", "d1", "execute", "asyncrpg", D1_TARGET, "--json", "--command", sql],
+    { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"], cwd: REPO_ROOT },
   );
 }
 
@@ -137,8 +252,26 @@ function cleanup() {
   }
 }
 
+/**
+ * Say what is about to be written to, loudly enough that a production run
+ * cannot be mistaken for a local one at a glance. The single-line form is kept
+ * verbatim in both cases because captured smoke output is quoted in the repo.
+ */
+function banner() {
+  if (!LOCAL) {
+    const rule = "!".repeat(74);
+    console.log(rule);
+    console.log("!!  PRODUCTION — this run seeds and then DELETES rows in the LIVE database");
+    console.log(`!!  url:      ${BASE}`);
+    console.log("!!  database: asyncrpg --remote");
+    console.log("!!  ctrl-c now if you meant the local suite (npm run smoke:local)");
+    console.log(rule);
+  }
+  console.log(`asyncrpg smoke — ${BASE} (d1 ${D1_TARGET})\n`);
+}
+
 async function main() {
-  console.log(`asyncrpg smoke — ${BASE}\n`);
+  banner();
 
   // ─── unauthenticated surface ─────────────────────────────────────────
   console.log("unauthenticated:");
@@ -519,6 +652,76 @@ async function main() {
   });
   check("the host can rebuild the chronicle from canonical state", hostReproject.status === 200);
 
+  // ─── the DM seat ─────────────────────────────────────────────────────────
+  // The seat is the only thing in the app that can rewrite what the group
+  // reads, so every one of these is a real escalation if it comes back 200.
+  // `host` created the campaign and therefore holds the seat; `outsider` is by
+  // now a full member who does not. That is exactly the pair these need: a
+  // refusal that only proves "you are not in this campaign" would say nothing
+  // about whether the seat is enforced.
+
+  const dmBeat = await req(`/api/campaigns/${slug}/dm/beat`, {
+    method: "PATCH",
+    cookie: outsider.cookie,
+    body: { tick: 1, prose: "I rewrite the story." },
+  });
+  check("a member without the seat cannot rewrite a beat", dmBeat.status === 403, `status ${dmBeat.status}`);
+
+  const dmPublish = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: outsider.cookie,
+  });
+  check("a member without the seat cannot publish", dmPublish.status === 403, `status ${dmPublish.status}`);
+
+  const dmSeize = await req(`/api/campaigns/${slug}/dm`, {
+    method: "POST",
+    cookie: outsider.cookie,
+    body: { playerId: outsider.playerId },
+  });
+  check(
+    "a member who is neither host nor DM cannot take the seat",
+    dmSeize.status === 403,
+    `status ${dmSeize.status}`,
+  );
+
+  const dmOutsider = await req(`/api/campaigns/${slug}/dm`, {
+    method: "POST",
+    cookie: host.cookie,
+    body: { playerId: `plr_${SMOKE_PREFIX}_nobody` },
+  });
+  check("cannot seat a player who is not a member", dmOutsider.status === 400, `status ${dmOutsider.status}`);
+
+  const dmAnon = await req(`/api/campaigns/${slug}/dm/review`, { method: "GET" });
+  check("the review desk needs a session", dmAnon.status === 401, `status ${dmAnon.status}`);
+
+  // A dropped, truncated, or oversized body used to read as "vacate" and
+  // answer 200, quietly leaving the campaign with no DM.
+  //
+  // All three shapes are sent, because they do not travel the same path
+  // through the handler: `{}` parses and is caught by the value check, while a
+  // missing body and an over-cap one both make `readJson` answer null and are
+  // caught by the envelope check. A fix to either one alone leaves the other
+  // vacating the seat, so testing only `{}` would miss half the defect.
+  for (const [label, body] of [
+    ["an empty body", {}],
+    ["a missing body", undefined],
+    ["an oversized body", JSON.stringify({ playerId: "x".repeat(64_000) })],
+  ]) {
+    const res = await req(`/api/campaigns/${slug}/dm`, { method: "POST", cookie: host.cookie, body });
+    check(`${label} is refused rather than read as vacate`, res.status === 400, `status ${res.status}`);
+  }
+  // The status alone does not prove the fix — a 400 that vacated anyway would
+  // pass every one of them — so the seat is read back out of D1 and must still
+  // be the host's.
+  const seatAfterEmpty = d1Rows(
+    `SELECT dm_player_id FROM campaigns WHERE id = '${esc(campaignId)}'`,
+  );
+  check(
+    "a refused seat write leaves the seat exactly where it was",
+    seatAfterEmpty[0]?.dm_player_id === host.playerId,
+    `dm_player_id=${seatAfterEmpty[0]?.dm_player_id ?? "null"} expected=${host.playerId}`,
+  );
+
   const dupSlug = await req("/api/campaigns", {
     method: "POST",
     cookie: host.cookie,
@@ -560,18 +763,125 @@ async function main() {
   const xssSlug = await req(`/c/${encodeURIComponent("<script>alert(1)</script>")}`);
   check("script tag in a chronicle path does not render", xssSlug.status === 404);
 
-  // Stored-XSS probe: an action containing markup must never reach the
-  // chronicle unescaped.
+  // Stored-XSS probe: player-authored markup must never reach the chronicle
+  // unescaped.
+  //
+  // The assertion is positive as well as negative. "the raw tag is absent"
+  // passes just as happily when the payload never reached the page at all, so
+  // on its own it is one upstream regression away from proving nothing. The
+  // positive half pins the page as the thing under test: the *escaped* form
+  // must be present, which fails if the payload went missing.
+  //
+  // The payload rides in twice. As a journal entry it is rendered verbatim by
+  // construction, which is what makes the positive half deterministic — a
+  // model-narrated beat may paraphrase the player's words instead of quoting
+  // them, so the beat path cannot carry a string this check demands be there.
+  // As an action it still exercises the beat path, under the two negative
+  // assertions.
+  const xssPayload = `<img src=x onerror="alert(1)"> I shout <b>loudly</b>.`;
+  const xssEscaped = "&lt;img src=x onerror=&quot;alert(1)&quot;&gt; I shout &lt;b&gt;loudly&lt;/b&gt;.";
+  await req(`/api/campaigns/${slug}/journal`, {
+    method: "POST",
+    cookie: host.cookie,
+    body: { body: xssPayload },
+  });
   await req(`/api/campaigns/${slug}/action`, {
     method: "POST",
     cookie: host.cookie,
-    body: { text: `<img src=x onerror="alert(1)"> I shout <b>loudly</b>.` },
+    body: { text: xssPayload },
   });
   await req(`/api/campaigns/${slug}/resolve`, { method: "POST", cookie: host.cookie });
+  // The creator holds the DM seat, so that resolve *held* the new beat instead
+  // of publishing it. Without releasing it first the chronicle below renders
+  // the previous turn, and the escaping assertion passes without the payload
+  // ever having been rendered — a check that proves nothing.
+  await req(`/api/campaigns/${slug}/dm/publish`, { method: "POST", cookie: host.cookie });
   const afterXss = await req(`/c/${slug}`);
   check(
     "player-authored markup is escaped in the chronicle",
-    !afterXss.text.includes("<img src=x onerror") && !afterXss.text.includes("<b>loudly</b>"),
+    afterXss.text.includes(xssEscaped) &&
+      !afterXss.text.includes("<img src=x onerror") &&
+      !afterXss.text.includes("<b>loudly</b>"),
+    afterXss.text.includes(xssEscaped) ? "escaped payload rendered" : "payload never rendered",
+  );
+
+  // The narrator's own prose, captured here because the DM edit further down
+  // overwrites the campaign's latest beat with a literal from this file. The
+  // "the story is in-app" check in operational controls measures *this*, not
+  // that literal: measured on the latest beat it would be measuring the
+  // suite's own writing, and a narrator emitting a single character per beat
+  // would sail through it.
+  const narrated = (await req(`/api/campaigns/${slug}`, { cookie: host.cookie })).json?.latestBeat;
+
+  console.log("\nthe seat holds a beat until the DM publishes it:");
+  await req(`/api/campaigns/${slug}/action`, {
+    method: "POST",
+    cookie: host.cookie,
+    body: { text: "I set a lantern in the tower window and wait for an answer." },
+  });
+  await req(`/api/campaigns/${slug}/resolve`, { method: "POST", cookie: host.cookie });
+
+  const review = await req(`/api/campaigns/${slug}/dm/review`, { cookie: host.cookie });
+  check(
+    "the review desk shows the new beat, still held",
+    review.status === 200 && review.json?.beat?.held === true,
+    `status ${review.status} held=${review.json?.beat?.held}`,
+  );
+  const heldTick = review.json?.beat?.tick;
+
+  // A marker the machine could never have written, so its presence in the
+  // chronicle is proof the DM's text got there and not merely that *some*
+  // beat rendered. This edit becomes the campaign's latest beat, which is why
+  // the "the story is in-app" check below measures `narrated` — captured
+  // before this line ran — instead of whatever the latest beat now says.
+  const marker = `HELD${stamp}MARK`;
+  const edited = await req(`/api/campaigns/${slug}/dm/beat`, {
+    method: "PATCH",
+    cookie: host.cookie,
+    body: {
+      tick: heldTick,
+      prose:
+        `${marker} — the lantern burned in the tower window until dawn, and by first ` +
+        `light the watch had counted three riders on the north road who did not stop.`,
+    },
+  });
+  check("the DM can rewrite the held beat", edited.status === 200, `status ${edited.status}`);
+
+  const chronicleHeld = await req(`/c/${slug}`);
+  check(
+    "a held beat is not visible on the public chronicle",
+    chronicleHeld.status === 200 && !chronicleHeld.text.includes(marker),
+    `status ${chronicleHeld.status}`,
+  );
+
+  const published = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: host.cookie,
+  });
+  check(
+    "the DM can publish the held beat",
+    published.status === 200 && published.json?.published === true && published.json?.tick === heldTick,
+    `published=${published.json?.published} tick=${published.json?.tick} held=${heldTick}`,
+  );
+
+  // This is what keeps the check above from being satisfied by a chronicle
+  // that renders nothing at all: same marker, same URL, same anonymous reader,
+  // and the only thing that changed between the two is the publish.
+  const chronicleAfter = await req(`/c/${slug}`);
+  check(
+    "the same beat is visible to an anonymous reader once published",
+    chronicleAfter.status === 200 && chronicleAfter.text.includes(marker),
+    `status ${chronicleAfter.status}`,
+  );
+
+  const publishedAgain = await req(`/api/campaigns/${slug}/dm/publish`, {
+    method: "POST",
+    cookie: host.cookie,
+  });
+  check(
+    "publishing twice does not publish twice",
+    publishedAgain.status === 200 && publishedAgain.json?.published === false,
+    `published=${publishedAgain.json?.published}`,
   );
 
   console.log("\ndeep play (optional, never an advantage):");
@@ -602,10 +912,19 @@ async function main() {
 
   console.log("\noperational controls:");
   const snapAfter = await req(`/api/campaigns/${slug}`, { cookie: host.cookie });
+  // Two facts, both required: the campaign view still carries a latest beat
+  // (the in-app surface works), and the beat the *narrator* wrote was real
+  // prose. The length is asserted against `narrated` — captured before the DM
+  // rewrite above — because `snapAfter.latestBeat` is by now the 159-character
+  // string this file sent in that rewrite, and measuring it would only prove
+  // that the suite can count its own literal.
   check(
     "the campaign view carries the latest beat, so the story is in-app",
-    typeof snapAfter.json?.latestBeat?.prose === "string" && snapAfter.json.latestBeat.prose.length > 40,
-    `${snapAfter.json?.latestBeat?.prose?.length ?? 0} chars`,
+    typeof snapAfter.json?.latestBeat?.prose === "string" &&
+      typeof narrated?.prose === "string" &&
+      narrated.prose.length > 40,
+    `narrator wrote ${narrated?.prose?.length ?? 0} chars (source=${narrated?.source ?? "none"}); ` +
+      `view now carries ${snapAfter.json?.latestBeat?.prose?.length ?? 0}`,
   );
   check(
     "the campaign view carries the player's own character sheet",
@@ -617,14 +936,30 @@ async function main() {
   );
 
   // Both token directions must be metered — input is the larger share here.
+  //
+  // A local `wrangler dev` has no ANTHROPIC_API_KEY, so no inference runs and
+  // there is no spend to meter. Asserting spend there would assert something
+  // false. The invariant that holds everywhere is the pairing of the two
+  // facts, so that is what is checked: metered spend must cover both
+  // directions, and an unmetered campaign must be one that was never narrated
+  // by the model. That still catches the dangerous bug — the model wrote the
+  // beat and nobody was billed — instead of skipping the check off-cloud.
   const budget = d1Rows(
     `SELECT input_tokens, output_tokens FROM token_budget WHERE campaign_id = '${esc(campaignId)}'`,
   );
-  check(
-    "inference spend is metered in both directions",
-    budget.length > 0 && budget[0].input_tokens > 0 && budget[0].output_tokens > 0,
-    JSON.stringify(budget[0] ?? {}),
-  );
+  if (budget.length > 0) {
+    check(
+      "inference spend is metered in both directions",
+      budget[0].input_tokens > 0 && budget[0].output_tokens > 0,
+      JSON.stringify(budget[0]),
+    );
+  } else {
+    check(
+      "an unmetered campaign is one the model never narrated",
+      resolved.json?.source === "templated",
+      `no token_budget row, and narration source=${resolved.json?.source}`,
+    );
+  }
 
   const killSwitch = d1Rows(`SELECT value FROM settings WHERE key = 'inference_enabled'`);
   check("a global inference kill switch exists", killSwitch.length === 1, JSON.stringify(killSwitch[0] ?? {}));

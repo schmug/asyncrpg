@@ -15,6 +15,9 @@ const beat = (tick: number) => ({
   prose: `Turn ${tick} happened.`,
   source: "model",
   created_at: "2026-08-02T00:00:00Z",
+  // Chapters only ever see chronicle-visible beats: published, not mid-revision.
+  published_at: "2026-08-02T00:00:00Z",
+  revised_by: null,
 });
 
 const event = (tick: number, summary: string, significance: number, kind = "faction_war") => ({
