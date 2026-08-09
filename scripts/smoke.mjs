@@ -33,6 +33,17 @@ function check(name, ok, detail = "") {
   console.log(`  [${mark}] ${name}${detail ? ` — ${detail}` : ""}`);
 }
 
+/**
+ * A local dev server is backed by the local D1, not the deployed one.
+ *
+ * The flag has to follow the target or the suite is worse than broken: seeding
+ * a session in the remote database and then handing that cookie to
+ * `wrangler dev` authenticates nobody, and every signed-in check fails for a
+ * reason that has nothing to do with the app — while the rows, and the
+ * cleanup's DELETEs, land in production.
+ */
+const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE);
+
 function d1Rows(sql) {
   try {
     return JSON.parse(d1(sql))[0]?.results ?? [];
@@ -44,7 +55,16 @@ function d1Rows(sql) {
 function d1(sql) {
   return execFileSync(
     "npx",
-    ["wrangler", "d1", "execute", "asyncrpg", "--remote", "--json", "--command", sql],
+    [
+      "wrangler",
+      "d1",
+      "execute",
+      "asyncrpg",
+      LOCAL ? "--local" : "--remote",
+      "--json",
+      "--command",
+      sql,
+    ],
     { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
   );
 }
