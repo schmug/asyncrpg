@@ -29,8 +29,14 @@
       <section id="view-signin" hidden>
         <h1>A tabletop campaign that waits for you</h1>
         <p class="lede">
-          Your group plays by email, at whatever pace suits. Miss a week and nothing bad happens —
-          no penalty, ever. The world keeps turning; you pick up where you left off.
+          Your group plays by email, at whatever pace suits. Miss a week and nothing is taken from
+          you — no stat loss, no lingering injury, no standing to fall behind on. Your character
+          steps offscreen and rests. When you come back you get a recap, and the party takes you
+          straight back in. The world keeps turning either way.
+        </p>
+        <p class="fine">
+          The one thing showing up buys is <em>story</em>: the people who played are the ones the
+          chronicle is about. That is the only difference, and it is on purpose.
         </p>
         <form id="signin-form" novalidate>
           <label for="email">Your email</label>
@@ -46,6 +52,27 @@
           <button type="submit" class="primary">Email me a sign-in link</button>
         </form>
         <p class="fine">No password. We send a link that works once.</p>
+        <div id="signin-help" hidden>
+          <h2>If the email doesn't arrive</h2>
+          <ol class="how">
+            <li>
+              Give it a minute, then <strong>check your spam or junk folder</strong>. The mail comes
+              from <strong>dm@cortech.online</strong>.
+            </li>
+            <li>
+              Add that address to your contacts. It is the same address your turns will come from,
+              so it is worth doing once.
+            </li>
+            <li>
+              Ask for another link — the button above works as many times as you need, and each
+              link replaces the last.
+            </li>
+            <li>
+              Still nothing? Some corporate and school mail systems drop unknown senders outright.
+              A personal address is the reliable fallback, and the host can re-invite you at it.
+            </li>
+          </ol>
+        </div>
       </section>
 
       <!-- Signed in, campaign list -->
@@ -109,6 +136,11 @@
 
         <div id="c-clock" class="clock"></div>
         <p id="c-repair" class="status err" hidden></p>
+        <p id="c-maildown" class="status warn" hidden></p>
+        <div id="halt-box" hidden>
+          <p id="c-halted" class="status err"></p>
+          <button id="resume-btn" class="primary" type="button">Try this turn again</button>
+        </div>
 
         <section id="beat-box" hidden>
           <h2 id="beat-heading">The story so far</h2>
@@ -140,6 +172,29 @@
           </details>
         </section>
 
+        <details id="how-it-works">
+          <summary>How this works</summary>
+          <ol class="how">
+            <li>
+              <strong>Write what your character does</strong>, in plain language — "I follow the
+              tracks into the marsh", not a command. There is no syntax to learn.
+            </li>
+            <li>
+              <strong>Or just reply to the email.</strong> Every turn is sent to your inbox and
+              replying to it is exactly the same as typing here. You never have to open this page.
+            </li>
+            <li>
+              <strong>The turn resolves</strong> when enough of the group has acted, or when the
+              deadline passes — whichever comes first. You are never the one holding it up.
+            </li>
+            <li>
+              <strong>If you are busy, nothing bad happens.</strong> Your character acts in
+              character for a turn or two, then steps offscreen and rests. Come back whenever;
+              you get a recap and the party brings you back in level with everyone else.
+            </li>
+          </ol>
+        </details>
+
         <form id="action-form" novalidate>
           <label for="action" id="action-label">What do you do?</label>
           <textarea
@@ -153,7 +208,10 @@
           <button type="submit" class="primary">Submit turn</button>
         </form>
 
-        <details id="sheet-details">
+        <!-- Open by default: who you are is orientation, not an optional
+             extra, and a player should not have to go looking for it. The
+             genuinely optional sections below stay collapsed. -->
+        <details id="sheet-details" open>
           <summary>Your character</summary>
           <div id="sheet"></div>
         </details>
@@ -168,12 +226,37 @@
           </p>
           <label for="invite-url" id="invite-url-label" hidden>Invite link</label>
           <input id="invite-url" type="text" readonly hidden />
+
+          <details id="pace-details">
+            <summary>Change the pace</summary>
+            <p class="fine">
+              Groups find their real pace by playing. Changing it takes effect from the current
+              turn — nothing already submitted is lost.
+            </p>
+            <form id="pace-form" novalidate>
+              <label for="pace-cadence">How often a turn resolves</label>
+              <select id="pace-cadence" name="cadence">
+                <option value="daily">Daily</option>
+                <option value="weekly">Weekly</option>
+                <option value="monthly">Monthly</option>
+              </select>
+              <label for="pace-quorum">How much of the party has to act first</label>
+              <select id="pace-quorum" name="quorumFraction">
+                <option value="0.34">About a third</option>
+                <option value="0.5">Half</option>
+                <option value="0.75">Three quarters</option>
+                <option value="1">Everyone</option>
+              </select>
+              <button type="submit" class="primary">Save the pace</button>
+            </form>
+          </details>
         </div>
 
         <h2>Between turns</h2>
         <p class="fine">
-          Optional. None of this makes your character stronger — skipping all of it costs you
-          nothing.
+          Entirely optional. None of it changes your character's abilities, standing, or
+          relationships — it puts you in the story, and that is all it does. Skipping every bit of
+          it forever costs you nothing at all.
         </p>
 
         <details id="dt-details">
@@ -211,19 +294,23 @@
         </details>
 
         <details id="journal-details">
-          <summary>Write a private scene</summary>
+          <summary>Write a solo scene</summary>
           <form id="journal-form" novalidate>
             <label for="journal-title">Title (optional)</label>
             <input id="journal-title" name="title" type="text" maxlength="120" placeholder="The night before" />
+            <p class="fine">
+              Solo means only your character is in it — <strong>not</strong> that it stays private.
+              It is published on the public chronicle, where anyone with the link can read it.
+            </p>
             <label for="journal-body">What happens</label>
             <textarea
               id="journal-body"
               name="body"
               rows="5"
               maxlength="8000"
-              placeholder="A moment only your character was there for. It joins the chronicle."
+              placeholder="A moment only your character was there for."
             ></textarea>
-            <button type="submit" class="primary">Add to the chronicle</button>
+            <button type="submit" class="primary">Publish to the chronicle</button>
           </form>
         </details>
 

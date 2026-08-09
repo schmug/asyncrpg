@@ -14,16 +14,21 @@ Precisely:
 
 > The **simulation** never penalizes absence — never, for any length of absence,
 > costs you attributes, skills, renown, items, conditions, your life, or access
-> to anything. That is enforced by tests and proven by a 1500-tick soak.
+> to anything. Conditions actually *heal* while you are offscreen, because an
+> injury preserved because you were busy is a penalty wearing a different coat,
+> and when you come back `restoreStanding` lifts your renown and your bonds to
+> the **middle of the party** — never past it: you are not rewarded for being
+> away and cannot overtake the people who showed up; you simply do not resume
+> from behind. All of that is enforced by tests and proven by a 1500-tick soak.
 >
 > A **human DM** has full authority over canon, and every edit they make is
 > recorded and attributed in the chronicle. Campaigns with no DM — and campaigns
 > whose DM edits nothing — get the promise absolutely.
 
-There is also no XP ladder to fall behind on. Absence does mean fewer entries in
-the chronicle than someone who played every week — story presence is the one
-thing engagement buys, and it buys nothing mechanical. See the spec for why that
-line is drawn where it is.
+There is no XP ladder to fall behind on either. What showing up buys is *story*:
+the people who played are the ones the chronicle is about, permanently. That is
+the only asymmetry, it is deliberate, and it is worth nothing mechanically. See
+the spec for why the line is drawn there.
 
 Today the second paragraph describes the design, not shipped behaviour: **no DM
 can change world state yet.** The seat that ships reaches prose, timing, and the
@@ -44,13 +49,17 @@ escalate, settlements prosper and revolt, NPCs remember exactly how you treated
 them. All of it advances whether or not anyone shows up.
 
 The model does two schema-bounded jobs: turn what you typed into a typed
-action, and turn resolved events into prose. It proposes no state changes at
-all, because there is no channel on which to propose one. Intent parsing is the
-only path by which model output reaches state, and it is doubly bounded: the
-verb must be in a fixed enum, and the target must resolve to an entity that
-already exists. A model that invents "the Duke of Nowhere" produces an action
-with no target, never a new entity. It cannot invent a faction, resurrect a
-dead NPC, or move your party across the map.
+action, and turn resolved events into prose. **It is never asked for a state
+change at all** — there is no channel through which one could arrive. Its
+action output is one verb from a fixed enum plus a target the sim resolves
+against entities that already exist, and its narration output is prose that is
+read, never written back. A model that invents "the Duke of Nowhere" produces
+an action with no target, never a new entity. It cannot invent a faction,
+resurrect a dead NPC, or move your party across the map, because nothing it
+emits is a state edit.
+
+That is a stronger guarantee than validating proposed deltas and rejecting the
+illegal ones: there is no delta path to get wrong.
 
 That constraint is what buys coherence over months of play. The baron your
 party snubbed in tick 3 is a row with a grudge value, not a sentence in a
@@ -89,8 +98,8 @@ web/PWA  ──► Worker fetch()  ─┘   DO SQLite = canonical world state
                     2. player actions       seeded dice vs sim rules → events
                     3. absence policy       auto-act │ offscreen
                     4. LLM narrate          events + state → prose + one scene
-                                            line, and nothing else — there is no
-                                            channel by which narration writes state
+                                            line (read, never written back);
+                                            unusable → templated fallback
                     5. project → D1         the queryable chronicle
                     6. hold for review      only if the campaign has a DM
                     7. fan out              email + web
@@ -289,17 +298,19 @@ on two consecutive cycles.
 
 | Gate | What it proves |
 |---|---|
-| `npm test` | 362 tests across 15 files, including the absence promise, the world invariants, and the DM seat, review window, and seat reversion |
+| `npm test` | 577 tests across 27 files, including the absence promise, the world invariants, and the DM seat, review window, and seat reversion |
 | `npm run typecheck` | clean |
 | `npm run sim:soak -- --ticks 1500` | 1500 deterministic ticks, invariants held on every one, replay identical, an absent player unpenalised, economy and state size bounded |
-| `scripts/smoke.mjs` | 77 assertions against a served target, most of them adversarial |
-| `scripts/ui-smoke.mjs` | 59 assertions driving the real app at a mobile viewport, service workers blocked |
+| `npm run sim:endurance` | 4 players over 60 ticks — quorum and deadline resolution, absences of 1/3/30 turns, re-entry recaps, and the no-penalty promise asserted every turn |
+| `scripts/smoke.mjs` | 95 assertions against a served target, most of them adversarial |
+| `scripts/ui-smoke.mjs` | 60 assertions driving the real app at a mobile viewport, service workers blocked |
 | `scripts/email-e2e.mjs` | 23 assertions including a full round trip through real Cloudflare Email Routing |
 
-The first three rows were run against this revision. The last three were not:
-each needs a served target, and the email suite needs real Cloudflare Email
-Routing besides. Their numbers are **assertion call sites counted in the scripts
-themselves**, not the totals a run prints —
+The first three rows were run against this revision. The rest were not:
+`sim:endurance` arrived with a merge from `main` and has not been re-run here,
+and the last three each need a served target — the email suite needs real
+Cloudflare Email Routing besides. Their numbers are **assertion call sites
+counted in the scripts themselves**, not the totals a run prints —
 
 ```bash
 grep -cE '^[[:space:]]*(await )?check\(' scripts/smoke.mjs scripts/ui-smoke.mjs scripts/email-e2e.mjs

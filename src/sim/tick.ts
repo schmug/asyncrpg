@@ -15,7 +15,7 @@
  * design cannot tolerate: it silently ends the game for everyone.
  */
 
-import { buildRecap, pickAutoAction, presenceFor } from "./character";
+import { buildRecap, pickAutoAction, presenceFor, restoreStanding } from "./character";
 import type { AbsenceConfig } from "./character";
 import { driftWorld } from "./drift";
 import { EventLog } from "./events";
@@ -124,6 +124,16 @@ export function runTick(
     const wasPresence = character.presence;
 
     if (acted) {
+      // Catch-up applies to *any* return from absence, not only a long one.
+      // Drawing the line at "offscreen" would mean a player who missed one or
+      // two turns came back fractionally behind and a player who missed thirty
+      // came back level — a smaller penalty than the big one, but a penalty,
+      // and precisely the kind the promise forbids. Being brought to the party
+      // median costs nothing when you have barely fallen behind, so there is
+      // no reason to withhold it.
+      if (wasPresence !== "present") {
+        restoreStanding(state, character);
+      }
       if (wasPresence === "offscreen") {
         recaps[character.id] = buildRecap(opts.history ?? [], character.lastActedTick);
         log.add("character_returned", `${character.name} is back among the party.`, {

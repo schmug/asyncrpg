@@ -6,7 +6,7 @@
  * campaign in production. The backfill is the point of this test.
  *
  * These run against `migrations/*.sql` themselves, not a restatement of them
- * (see `test/helpers/schema.ts`). Deleting `0005_dm.sql`, or deleting its
+ * (see `test/helpers/schema.ts`). Deleting `0007_dm.sql`, or deleting its
  * `UPDATE beats` line, turns this file red.
  */
 
@@ -58,7 +58,10 @@ const STATEMENT_COUNTS: Record<string, number> = {
   "0002_invites.sql": 3,
   "0003_ops.sql": 6,
   "0004_email_loopback.sql": 2,
-  "0005_dm.sql": 8,
+  "0005_delivery.sql": 2,
+  "0005_event_targets.sql": 1,
+  "0006_inbound_log.sql": 2,
+  "0007_dm.sql": 8,
 };
 
 async function tableNames(): Promise<string[]> {
@@ -167,12 +170,12 @@ describe("slice-1 schema", () => {
   });
 });
 
-describe("the 0005 backfill", () => {
+describe("the 0007 backfill", () => {
   /**
    * The hazard, reproduced: a beat that existed before `published_at` did.
    *
    * Applying 0001–0004 only, writing a beat against that older shape, and then
-   * running 0005 over it is the one arrangement in which the `UPDATE beats SET
+   * running 0007 over it is the one arrangement in which the `UPDATE beats SET
    * published_at = created_at` line does any work. Delete that line and this
    * test fails.
    */
@@ -195,7 +198,7 @@ describe("the 0005 backfill", () => {
     await applySchema(env.DB);
   }
 
-  it("has no published_at column before 0005 runs", async () => {
+  it("has no published_at column before 0007 runs", async () => {
     await resetDatabase(env.DB);
     await applySchemaThrough(env.DB, "0004_email_loopback.sql");
     const { results } = await env.DB.prepare("PRAGMA table_info(beats)").all<{ name: string }>();

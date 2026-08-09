@@ -16,7 +16,7 @@
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
-import { mkdirSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync } from "node:fs";
 
 const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
 const OUT = "critic-reports/ui";
@@ -112,6 +112,8 @@ function cleanup() {
         `DELETE FROM entities WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM reply_bindings WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE '${SMOKE_PREFIX}%';`,
     );
@@ -123,16 +125,20 @@ function cleanup() {
 }
 
 /**
- * The touch-target bar, named once so per-control checks and the sweep below
- * cannot drift apart. Height is the binding constraint; a generous width floor
- * would fail every inline link, but a control only a few px wide is not a
- * target whatever its height.
+ * The touch-target bar, named once so the per-control checks below can share
+ * it. Height is the binding constraint; a generous width floor would fail
+ * every inline link, but a control only a few px wide is not a target
+ * whatever its height.
+ *
+ * The in-page sweep repeats these numbers literally: Playwright serializes
+ * the audit function into the browser, where Node-side constants do not
+ * exist. If the bar moves, it moves in both places.
  */
 const MIN_TOUCH_HEIGHT = 44;
 const MIN_TOUCH_WIDTH = 24;
 
 /** Every interactive control must clear MIN_TOUCH_HEIGHT/WIDTH CSS px. */
-const TOUCH_TARGET_AUDIT = `(() => {
+const TOUCH_TARGET_AUDIT = () => {
   const bad = [];
   const sel = 'a, button, input, textarea, select, summary, [role="button"]';
   for (const el of document.querySelectorAll(sel)) {
@@ -143,10 +149,10 @@ const TOUCH_TARGET_AUDIT = `(() => {
     // Skip visually-hidden controls (clipped skip links and the like): they
     // are not touch targets, and a 1x1 clipped box is not an undersized one.
     if (r.width <= 4 || r.height <= 4) continue;
-    if (r.height < ${MIN_TOUCH_HEIGHT} || r.width < ${MIN_TOUCH_WIDTH}) {
+    if (r.height < 44 || r.width < 24) {
       const id = el.id ? '#' + el.id : '';
       const cls = el.className && typeof el.className === 'string'
-        ? '.' + el.className.trim().split(/\\s+/).join('.') : '';
+        ? '.' + el.className.trim().split(/\s+/).join('.') : '';
       const label = (el.textContent || '').trim().slice(0, 24);
       bad.push(el.tagName.toLowerCase() + id + cls +
         ' ' + Math.round(r.width) + 'x' + Math.round(r.height) +
@@ -154,9 +160,9 @@ const TOUCH_TARGET_AUDIT = `(() => {
     }
   }
   return bad;
-})()`;
+};
 
-const A11Y_AUDIT = `(() => {
+const A11Y_AUDIT = () => {
   const issues = [];
   if (!document.documentElement.lang) issues.push('<html> has no lang');
   if (!document.title) issues.push('no <title>');
@@ -181,9 +187,20 @@ const A11Y_AUDIT = `(() => {
     if (!b.textContent.trim() && !b.getAttribute('aria-label')) issues.push('button with no accessible name');
   }
   return issues;
-})()`;
+};
 
 mkdirSync(OUT, { recursive: true });
+// A failure screenshot from a *previous* run is worse than none: it ships in
+// every evidence bundle afterwards showing a broken-looking page next to a
+// 34/34 pass, and a reviewer has no way to tell it is stale. Remove it up
+// front so its presence always means "this run failed".
+rmSync(`${OUT}/99-failure.png`, { force: true });
+
+// Predicates below are passed as *functions*, never as strings. The app shell
+// now ships a CSP without `unsafe-eval`, and Playwright evaluates a string
+// predicate via eval — so the terser string form fails against the real
+// policy. Testing the deployed headers is the point; bypassing CSP in the
+// browser context would hide exactly the class of bug this suite exists for.
 console.log(`asyncrpg UI smoke — ${BASE} (mobile viewport)\n`);
 
 const browser = await chromium.launch();
@@ -247,7 +264,10 @@ try {
   // The form must not silently swallow a submission.
   await page.locator("#email").fill(`${SMOKE_PREFIX}+ui-${stamp}@example.invalid`);
   await page.locator('#signin-form button[type="submit"]').tap();
-  await page.waitForFunction("document.getElementById('status')?.textContent?.trim().length > 0", {
+  await page.waitForFunction(() => {
+    const el = document.getElementById("status");
+    return (el?.textContent?.trim().length ?? 0) > 0;
+  }, {
     timeout: 15000,
   });
   const signinStatus = (await page.locator("#status").innerText()).trim();
@@ -296,7 +316,10 @@ try {
 
   await page.locator('#create-form button[type="submit"]').tap();
   await page.waitForFunction(
-    `location.hash === '#/c/${slug}' || document.getElementById('status')?.className?.includes('err')`,
+    (want) =>
+      location.hash === `#/c/${want}` ||
+      (document.getElementById("status")?.className ?? "").includes("err"),
+    slug,
     { timeout: 90_000 },
   );
   check("creating a campaign navigates into it", page.url().includes(`#/c/${slug}`), page.url());
@@ -322,7 +345,10 @@ try {
   console.log("\ntaking a turn:");
   await page.locator("#action").fill("I walk the wall at dusk and count the watchfires.");
   await page.locator('#action-form button[type="submit"]').tap();
-  await page.waitForFunction("document.getElementById('status')?.textContent?.trim().length > 0", {
+  await page.waitForFunction(() => {
+    const el = document.getElementById("status");
+    return (el?.textContent?.trim().length ?? 0) > 0;
+  }, {
     timeout: 120_000,
   });
   const turnStatus = (await page.locator("#status").innerText()).trim();
@@ -566,10 +592,40 @@ try {
   // ─── console gate ──────────────────────────────────────────────────────
   console.log("\nruntime health:");
   check("no uncaught page errors", pageErrors.length === 0, pageErrors.slice(0, 3).join(" | "));
+
+  // The app ships exactly one script tag, external. Asserting that first is
+  // what makes the filter below honest: if we contribute no inline script,
+  // then an "inline script blocked" violation is not ours — it is the
+  // Cloudflare Web Analytics beacon the zone injects at the edge, which the
+  // shell's CSP now correctly refuses. Turning off auto-injection at the zone
+  // removes it entirely; that is the domain owner's call (docs/DEPLOYMENT.md).
+  //
+  // Filtered narrowly and named, rather than relaxing the policy to
+  // 'unsafe-inline' or letting a permanent known error redden the gate until
+  // nobody reads it. Every other console error still fails.
+  // Read the *source*, not the served page: the served page contains the
+  // injected beacon by definition, which is the very thing being attributed.
+  const shellSource = readFileSync("public/index.html", "utf8");
+  const inlineScripts = [...shellSource.matchAll(/<script(?![^>]*\bsrc=)[^>]*>/gi)];
+  check(
+    "the app ships no inline script of its own",
+    inlineScripts.length === 0,
+    inlineScripts.map((m) => m[0]).join(" | "),
+  );
+
+  const injectedBeacon = /Executing inline script violates|cloudflareinsights/i;
+  const zoneInjected = consoleErrors.filter((e) => injectedBeacon.test(e));
+  if (zoneInjected.length > 0) {
+    console.log(
+      `  (note: ${zoneInjected.length} CSP violation(s) from the zone's injected ` +
+        `analytics beacon — known boundary, see docs/DEPLOYMENT.md)`,
+    );
+  }
+  const ourErrors = consoleErrors.filter((e) => !injectedBeacon.test(e));
   check(
     "no console errors",
-    consoleErrors.length === 0,
-    [...consoleErrors.slice(0, 3), ...badResponses.slice(0, 3)].join(" | "),
+    ourErrors.length === 0,
+    [...ourErrors.slice(0, 3), ...badResponses.slice(0, 3)].join(" | "),
   );
   check("no failed network requests", failedRequests.length === 0, failedRequests.slice(0, 3).join(" | "));
 } catch (err) {

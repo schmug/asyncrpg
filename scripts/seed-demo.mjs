@@ -19,13 +19,33 @@ const arg = (name, fallback) => {
 const SLUG = arg("slug", "demo");
 const TICKS = Number.parseInt(arg("ticks", "6"), 10);
 
+/**
+ * A local dev server is backed by the local D1, not the deployed one.
+ *
+ * The flag has to follow the target or the seed is worse than useless: the
+ * players and their sessions land in the remote database while the HTTP calls
+ * that drive the play go to `wrangler dev`, which authenticates nobody — and
+ * the reset below, which is what makes re-running idempotent, deletes the
+ * *deployed* demo on its way past.
+ */
+const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE);
+
 const sha256 = (v) => createHash("sha256").update(v).digest("hex");
 const esc = (v) => String(v).replace(/'/g, "''");
 
 function d1(sql) {
   return execFileSync(
     "npx",
-    ["wrangler", "d1", "execute", "asyncrpg", "--remote", "--json", "--command", sql],
+    [
+      "wrangler",
+      "d1",
+      "execute",
+      "asyncrpg",
+      LOCAL ? "--local" : "--remote",
+      "--json",
+      "--command",
+      sql,
+    ],
     { encoding: "utf8", timeout: 120_000, stdio: ["ignore", "pipe", "pipe"] },
   );
 }
@@ -77,7 +97,15 @@ async function req(path, { method = "GET", body, cookie } = {}) {
 }
 
 async function main() {
-  console.log(`seeding demo "${SLUG}" on ${BASE}\n`);
+  console.log(`seeding demo "${SLUG}" on ${BASE}`);
+  // Every tick mails every member, and Cloudflare's sending quota is
+  // account-wide and daily. Seeding a long chronicle once exhausted it and
+  // broke outbound mail for the rest of the day, including sign-in links —
+  // so the cost is stated up front rather than discovered afterwards.
+  console.log(
+    `  this will send about ${TICKS * 3} emails ` +
+      `(${TICKS} ticks × 3 players) against the account's daily quota\n`,
+  );
 
   // Reset so re-running is idempotent.
   d1(

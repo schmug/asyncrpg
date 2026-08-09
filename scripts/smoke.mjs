@@ -40,6 +40,7 @@ import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, resolve } from "node:path";
+import { resolveMx, resolveTxt } from "node:dns/promises";
 
 // `wrangler --local` reads its D1 out of `.wrangler/` *relative to the working
 // directory*, so a run started from anywhere but the repo root would seed a
@@ -239,6 +240,8 @@ function cleanup() {
         `DELETE FROM downtime WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM letters WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM journals WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE '${SMOKE_PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${SMOKE_PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE '${SMOKE_PREFIX}%';`,
     );
@@ -274,6 +277,12 @@ async function main() {
   console.log("unauthenticated:");
   const health = await req("/api/health");
   check("health returns 200 ok", health.status === 200 && health.json?.ok === true);
+  // Provenance: without this, "the revision I reviewed" and "the deployment I
+  // measured" are two unverifiable claims that cycle 1 got wrong.
+  check(
+    "health names the revision the deployment was built from",
+    /^[0-9a-f]{40}$/.test(health.json?.revision ?? ""),
+  );
 
   const shell = await req("/");
   check("app shell serves HTML", shell.status === 200 && shell.text.includes("<html"));
@@ -282,10 +291,180 @@ async function main() {
     /name="viewport"[^>]*width=device-width/.test(shell.text),
   );
 
-  const csp = health.headers.get("content-security-policy") ?? "";
-  check("CSP is set and blocks framing", csp.includes("frame-ancestors 'none'"));
-  check("CSP does not allow inline script", !/script-src[^;]*unsafe-inline/.test(csp));
-  check("nosniff is set", health.headers.get("x-content-type-options") === "nosniff");
+  // ─── security-header drift ───────────────────────────────────────────
+  //
+  // The app sets these; the Cloudflare zone can override them on the way out,
+  // and twice now a critic has reasonably read the difference as the app
+  // lying about its own policy. So: assert what the app intends, and where the
+  // edge changes it, name the deviation explicitly. An *undocumented* drift
+  // fails the gate; a known one passes loudly, so it stays visible instead of
+  // being normalized into background noise. See docs/DEPLOYMENT.md.
+  // The zone's HSTS setting overrides the app's header, so this asserts the
+  // property that actually protects users rather than string equality with
+  // what the app asked for. A disabled header (max-age=0) is a hard failure —
+  // it used to be tolerated as "known drift", which is precisely the kind of
+  // normalization that lets a security regression live forever.
+  const hsts = health.headers.get("strict-transport-security") ?? "";
+  const maxAge = Number(/max-age=(\d+)/.exec(hsts)?.[1] ?? "0");
+  const MIN_MAX_AGE = 2_592_000; // 30 days
+  check(
+    "HSTS is enabled with a meaningful max-age",
+    maxAge >= MIN_MAX_AGE,
+    maxAge === 0
+      ? `HSTS IS DISABLED — serving "${hsts || "(absent)"}"`
+      : `max-age=${maxAge}s (${Math.round(maxAge / 86400)} days)`,
+  );
+  check("HSTS covers subdomains", /includeSubDomains/i.test(hsts), hsts);
+
+  // Checked on *every* surface, not just the API. The app shell is served by
+  // Cloudflare's asset layer before the Worker runs, so `harden()` never
+  // touched it — `/` went out with no CSP at all while `/api/health` had one,
+  // and asserting only the API hid that for four cycles.
+  for (const [label, res] of [
+    ["the API", health],
+    ["the app shell", shell],
+    ["the public chronicle", await req("/c/demo")],
+  ]) {
+    const csp = res.headers.get("content-security-policy") ?? "";
+    check(`CSP is set and blocks framing on ${label}`, csp.includes("frame-ancestors 'none'"), csp ? "" : "no CSP at all");
+    check(`CSP does not allow inline script on ${label}`, csp !== "" && !/script-src[^;]*unsafe-inline/.test(csp));
+    check(`nosniff is set on ${label}`, res.headers.get("x-content-type-options") === "nosniff");
+    check(`framing is denied on ${label}`, (res.headers.get("x-frame-options") ?? "").toUpperCase() === "DENY");
+    check(
+      `referrer policy is set on ${label}`,
+      (res.headers.get("referrer-policy") ?? "").length > 0,
+    );
+  }
+
+  // ─── email authentication ────────────────────────────────────────────
+  //
+  // Whether Gmail or Outlook drops a beat into spam cannot be measured from
+  // here. What *can* be measured is whether we have given them any reason to:
+  // SPF, DMARC, and inbound MX are the records every receiver checks first,
+  // and a silent regression in them would degrade the product's primary
+  // channel without a single request failing.
+  const MAIL_DOMAIN = "cortech.online";
+  console.log("\nemail authentication:");
+  try {
+    const txt = (await resolveTxt(MAIL_DOMAIN)).map((r) => r.join(""));
+    const spf = txt.find((r) => r.startsWith("v=spf1"));
+    check("SPF record exists", Boolean(spf), spf ?? "none found");
+    check(
+      "SPF authorizes Cloudflare Email Sending",
+      Boolean(spf && spf.includes("_spf.mx.cloudflare.net")),
+      spf ?? "",
+    );
+    check(
+      "SPF ends in a restrictive all",
+      Boolean(spf && /[-~]all\s*$/.test(spf)),
+      "+all would authorize the whole internet to send as this domain",
+    );
+  } catch (err) {
+    check("SPF record is resolvable", false, err.message);
+  }
+
+  try {
+    const dmarc = (await resolveTxt(`_dmarc.${MAIL_DOMAIN}`))
+      .map((r) => r.join(""))
+      .find((r) => r.startsWith("v=DMARC1"));
+    check("DMARC record exists", Boolean(dmarc), dmarc ?? "none found");
+    // Inbound reply authentication leans on Email Routing enforcing DMARC
+    // before the handler runs, so a missing policy is a security fact, not
+    // just a deliverability one.
+    check("DMARC declares a policy", Boolean(dmarc && /\bp=(none|quarantine|reject)\b/.test(dmarc)));
+  } catch (err) {
+    check("DMARC record is resolvable", false, err.message);
+  }
+
+  try {
+    const mx = await resolveMx(MAIL_DOMAIN);
+    check(
+      "MX points at Cloudflare Email Routing",
+      mx.some((r) => /mx\.cloudflare\.net$/.test(r.exchange)),
+      mx.map((r) => r.exchange).join(", ") || "none",
+    );
+  } catch (err) {
+    check("MX records are resolvable", false, err.message);
+  }
+
+  console.log("\nunauthenticated surface (continued):");
+  // Corruption has reached the public chronicle three times, each class caught
+  // by a critic rather than by us. The validator now rejects the shape they
+  // share; this asserts it against what is actually being served, because the
+  // validator only covers beats written *after* it shipped.
+  const demo = await req("/c/demo");
+  // Only the narrated beats. Stripping tags across the whole document leaves
+  // the inline stylesheet behind as text, and CSS is full of things that look
+  // exactly like a splice ("ol.tl{...}") — the check would fail on every run
+  // for a reason that has nothing to do with prose.
+  const prose = [...demo.text.matchAll(/<article class="beat">([\s\S]*?)<\/article>/g)]
+    .map((m) => m[1].replace(/<[^>]*>/g, " "))
+    .join("\n")
+    // Decode entities before judging characters. The chronicle escapes prose
+    // on the way out, so an unescaped extractor sees `&#39;` for every
+    // apostrophe — and reports the `#` as out-of-repertoire on every run.
+    .replace(/&#(\d+);/g, (_, d) => String.fromCodePoint(Number(d)))
+    .replace(/&#x([0-9a-f]+);/gi, (_, h) => String.fromCodePoint(parseInt(h, 16)))
+    .replace(/&quot;/g, '"')
+    .replace(/&lt;/g, "<")
+    .replace(/&gt;/g, ">")
+    .replace(/&amp;/g, "&");
+  // Without this, an extraction that matched nothing would make all three
+  // checks below pass on an empty string and read as clean.
+  check(
+    "the public chronicle actually contains beats to check",
+    prose.length > 500,
+    `${prose.length} chars of prose extracted`,
+  );
+  // MIRRORS `ARTIFACT_PATTERNS` in src/dm/narrate.ts. Kept as a copy because
+  // this is plain JS run outside the bundler; test/dm/artifact-parity.test.ts
+  // fails if the two lists drift apart.
+  const ARTIFACT_PATTERNS = [
+    ["spliced prose", /[a-z]{2}[.!?][A-Za-z0-9]/],
+    ["a stray code fence", /`{3,}/],
+    ["a literal escape sequence", /(?:\/\/|\\{1,2})[nt](?![a-z])/],
+    ["comment syntax", /(?<!:)\/\//],
+    [
+      "an AI aside",
+      /\b(?:as an AI|I should (?:not|probably)|let me (?:rewrite|try again)|ignore (?:that|the previous))\b/i,
+    ],
+    ["a self-correction", /\b(?:wait,\s*remove|remove that fragment|note to self)\b/i],
+    ["an editorial placeholder", /\[(?:note|todo|placeholder|redacted)\b/i],
+  ];
+  for (const [label, re] of ARTIFACT_PATTERNS) {
+    const hit = re.exec(prose);
+    check(
+      `the public chronicle is free of ${label}`,
+      hit === null,
+      hit
+        ? `found ${JSON.stringify(prose.slice(Math.max(0, hit.index - 50), hit.index + 50))}`
+        : "",
+    );
+  }
+
+  // The closed rule, mirroring ALLOWED_PROSE in src/dm/narrate.ts. Enumerating
+  // bad shapes missed a new class on five consecutive cycles; stating what
+  // prose may contain cannot be outflanked the same way.
+  const ALLOWED_PROSE = /^[\p{Script=Latin}\p{Mark}0-9 \n.,;:!?'"\u201c\u201d\u2018\u2019()\-\u2013\u2014\u2026&/%\u00b0$\u00a3\u20ac+*]*$/u;
+  const stripped = prose.replace(/[\u00ad\u200b-\u200d\ufeff]/g, "");
+  let offender = null;
+  if (!ALLOWED_PROSE.test(stripped)) {
+    for (const ch of stripped) {
+      if (!ALLOWED_PROSE.test(ch)) {
+        offender = `U+${ch.codePointAt(0).toString(16).toUpperCase().padStart(4, "0")}`;
+        break;
+      }
+    }
+  }
+  check(
+    "the public chronicle contains only characters prose is made of",
+    offender === null,
+    offender ? `found ${offender}` : "",
+  );
+  check(
+    "the public chronicle has no run of invisible filler",
+    !/[\u00ad\u200b-\u200d\ufeff]{3,}/.test(prose),
+  );
 
   const meAnon = await req("/api/me");
   check(
@@ -795,6 +974,26 @@ async function main() {
     if (r.status === 429) limited = true;
   }
   check("sign-in requests are rate limited", limited);
+
+  // Proving the limiter works leaves it tripped, and the limiter keys on IP —
+  // so the next suite to run from this machine (ui-smoke, which has to sign in
+  // to do anything) gets a 429 and reports it as a console error. That reads
+  // as a broken product when it is really this suite failing to clean up after
+  // itself, exactly like the D1 rows it already removes. Wait for the window
+  // to roll over before handing the machine on.
+  if (limited) {
+    process.stdout.write("  ...waiting out the sign-in rate limit window ");
+    for (let i = 0; i < 30; i++) {
+      await new Promise((r) => setTimeout(r, 5000));
+      process.stdout.write(".");
+      const probe = await req("/api/auth/request", {
+        method: "POST",
+        body: { email: `${SMOKE_PREFIX}+drain-${stamp}@example.invalid` },
+      });
+      if (probe.status !== 429) break;
+    }
+    console.log(" clear");
+  }
 
   const methodNotAllowed = await req(`/api/campaigns/${slug}/action`, { cookie: host.cookie });
   check("wrong method is refused", methodNotAllowed.status === 405 || methodNotAllowed.status === 404);

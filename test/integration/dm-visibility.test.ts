@@ -54,9 +54,9 @@ async function seed(): Promise<void> {
 
   const now = new Date().toISOString();
   for (const [id, email] of [
-    [DM, "dm@example.com"],
-    [PLAYER, "p@example.com"],
-    [OUTSIDER, "out@example.com"],
+    [DM, "dm@asyncrpg-fixtures.dev"],
+    [PLAYER, "p@asyncrpg-fixtures.dev"],
+    [OUTSIDER, "out@asyncrpg-fixtures.dev"],
   ]) {
     await env.DB.prepare("INSERT INTO players (id, email, created_at) VALUES (?,?,?)")
       .bind(id, email, now)

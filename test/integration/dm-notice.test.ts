@@ -67,8 +67,8 @@ async function seedCampaign(): Promise<void> {
 
   const now = new Date().toISOString();
   for (const [id, email] of [
-    [HOST, "host@example.com"],
-    [DM, "dee@example.com"],
+    [HOST, "host@asyncrpg-fixtures.dev"],
+    [DM, "dee@asyncrpg-fixtures.dev"],
   ]) {
     await env.DB.prepare("INSERT INTO players (id, email, created_at) VALUES (?,?,?)")
       .bind(id, email, now).run();
@@ -169,7 +169,7 @@ describe("review notice", () => {
       const mail = await settleSent(1);
       // Publication is held, so the notice is the *only* mail this turn.
       expect(mail).toHaveLength(1);
-      expect(mail[0]!.to).toBe("dee@example.com");
+      expect(mail[0]!.to).toBe("dee@asyncrpg-fixtures.dev");
       expect(mail[0]!.subject).toBe(reviewNoticeSubject(campaignName, summary.tick));
     });
 

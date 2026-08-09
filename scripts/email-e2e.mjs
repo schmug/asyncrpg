@@ -28,15 +28,29 @@
  *   Delivery to third-party mailboxes (Gmail, Outlook) and their spam
  *   handling. Nothing self-hosted can prove that; it needs seed-list testing.
  *
+ *   Anything at all when pointed at a local dev server. Email Routing delivers
+ *   to `worker:asyncrpg` — the deployment — and has no route to a `wrangler
+ *   dev` process, so hops #1 and #2 above cannot happen locally by
+ *   construction. The script refuses a local base rather than spend ten
+ *   minutes polling for mail that was never going to arrive; see the guard
+ *   above main().
+ *
  * Usage: node scripts/email-e2e.mjs [baseUrl]
+ *        baseUrl must be a deployment. A localhost base is refused, not run.
  */
 
 import { execFileSync } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 
 const BASE = (process.argv[2] ?? "https://play.cortech.online").replace(/\/$/, "");
+const LOCAL = /^https?:\/\/(localhost|127\.0\.0\.1|\[::1\])(:|\/|$)/.test(BASE);
 const PREFIX = "zzmail";
 const stamp = randomBytes(4).toString("hex");
+
+// Refusing a local base is a different outcome from failing one, and a caller
+// that cannot tell them apart will read "the mail path is broken" off a run
+// that never tested anything. 1 stays "ran and failed"; 2 is "declined to run".
+const EXIT_REFUSED = 2;
 
 const results = [];
 let failures = 0;
@@ -53,6 +67,9 @@ function run(cmd, args) {
   return execFileSync(cmd, args, { encoding: "utf8", timeout: 150_000, stdio: ["ignore", "pipe", "pipe"] });
 }
 function d1(sql) {
+  // `--remote` is unconditional here, unlike in the sibling scripts, because the
+  // guard below means every run that gets this far is aimed at a deployment.
+  // The local case never reaches this function.
   return run("npx", ["wrangler", "d1", "execute", "asyncrpg", "--remote", "--json", "--command", sql]);
 }
 function d1Rows(sql) {
@@ -95,6 +112,9 @@ function cleanup() {
         `DELETE FROM token_budget WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM email_loopback WHERE to_address LIKE '%rpgloop%' OR from_address LIKE '%rpgloop%';` +
         `DELETE FROM invites WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
+        `DELETE FROM delivery_failures WHERE player_id IN (SELECT id FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%');` +
+        `DELETE FROM inbound_log WHERE campaign_id IN (SELECT id FROM campaigns WHERE slug LIKE '${PREFIX}%');` +
         `DELETE FROM campaigns WHERE slug LIKE '${PREFIX}%';` +
         `DELETE FROM players WHERE email LIKE 'rpg-sink%' OR email LIKE '%rpgloop%';`,
     );
@@ -204,8 +224,14 @@ async function main() {
     bindings[0]?.code ?? "none",
   );
   check(
+    // Per (player, tick), not per player: a binding is minted for every player
+    // on every beat, so a second tick resolving while this test runs — a
+    // deadline firing, another suite forcing one — legitimately produces more
+    // rows for the same player. Asserting one row per player made this fail
+    // for a reason that had nothing to do with the property being tested.
     "bindings are per-player, not shared",
-    new Set(bindings.map((b) => b.player_id)).size === bindings.length,
+    new Set(bindings.map((b) => `${b.player_id}@${b.tick}`)).size === bindings.length,
+    `${bindings.length} rows across ${new Set(bindings.map((b) => b.tick)).size} tick(s)`,
   );
   check(
     "bindings are addressed to the members of this campaign",
@@ -323,20 +349,70 @@ async function main() {
 
   // The reply travels back through Email Routing into email(), where normal
   // inbound handling submits it. Its arrival is what proves the inbound hop.
+  // Two real SMTP deliveries have to complete inside this window, and provider
+  // latency is not ours to control — a 180s budget produced an intermittent
+  // failure that looked like a product blocker and passed on the next run.
   const landed = await waitFor(
     "inbound action landed",
     `SELECT event_id, summary FROM events
      WHERE campaign_id='${esc(loopId)}' AND kind='player_action'
        AND summary LIKE '%first light%'`,
+    300_000,
   );
-  check(
-    "a reply sent by real email became a turn in the campaign",
-    landed.length > 0,
-    landed[0]?.summary?.slice(0, 80) ?? "the reply never reached the handler",
-  );
+
+  // When it does fail, say *which* failure it was. "Never reached the handler"
+  // was previously the only available answer, and it is the one thing the
+  // evidence could not actually establish.
+  let diagnosis = landed[0]?.summary?.slice(0, 80) ?? "";
+  if (landed.length === 0) {
+    const seen = d1Rows(
+      `SELECT disposition, reason, created_at FROM inbound_log
+       WHERE created_at > '${new Date(before).toISOString()}'
+       ORDER BY created_at DESC LIMIT 5`,
+    );
+    diagnosis = seen.length
+      ? `handler saw it and decided: ${seen
+          .map((r) => `${r.disposition}(${r.reason})`)
+          .join("; ")}`
+      : "no inbound_log entry — Email Routing never delivered it to the Worker " +
+        "(routing rule, DMARC rejection upstream, or still in flight)";
+  }
+  check("a reply sent by real email became a turn in the campaign", landed.length > 0, diagnosis);
 
   console.log("\nSTILL NOT COVERED: deliverability to third-party mailboxes (Gmail, Outlook)");
   console.log("  and their spam handling — that needs seed-list testing, not a self-test.");
+}
+
+// This guard sits outside main() on purpose. The .finally() below runs cleanup(),
+// which issues a DELETE against the remote D1 — work we have no business doing on
+// behalf of a run we are declining, and slow enough to undercut the point of
+// refusing. Returning early from main() would still hit it; exiting here does not.
+if (LOCAL) {
+  console.error(`asyncrpg email path — refusing ${BASE}\n`);
+  console.error(
+    "This script asserts on bytes that traversed real Cloudflare Email Routing.\n" +
+      "Routing delivers to worker:asyncrpg — the deployment — and has no path to a\n" +
+      "`wrangler dev` process, so the two inbound hops cannot happen against a local\n" +
+      "base however long we wait. That is a property of Email Routing, not a\n" +
+      "misconfiguration something here could detect and report.\n",
+  );
+  // Named individually because "it didn't run" is the finding. A reader who is
+  // told only that the mail checks were skipped will assume the rest held.
+  console.error("SKIPPED — nothing below was proved about this target:");
+  console.error(
+    "  routing configuration  reads live account state and ignores the base entirely,\n" +
+      "                         so it would have reported PASS while describing production\n" +
+      "  outbound delivery      a binding row is only meaningful as evidence that Cloudflare\n" +
+      "                         accepted the message; locally nothing reaches Cloudflare\n" +
+      "  binding lookup         has nothing to look up without those bindings\n" +
+      "  inbound hop            the two real hops, unreachable by construction\n",
+  );
+  // Fixed-width labels first, variable-length base last, so this stays aligned
+  // whatever base was passed.
+  console.error("Instead:");
+  console.error("  the mail path, against the deployment:  node scripts/email-e2e.mjs");
+  console.error(`  what is honestly checkable locally:     node scripts/smoke.mjs ${BASE}`);
+  process.exit(EXIT_REFUSED);
 }
 
 main()

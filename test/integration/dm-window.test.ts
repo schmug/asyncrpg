@@ -57,7 +57,7 @@ async function seedCampaign(): Promise<void> {
 
   const now = new Date().toISOString();
   await env.DB.prepare("INSERT INTO players (id, email, created_at) VALUES (?,?,?)")
-    .bind(HOST, "host@example.com", now).run();
+    .bind(HOST, "host@asyncrpg-fixtures.dev", now).run();
   await env.DB.prepare(
     `INSERT INTO campaigns (id, slug, name, cadence, created_by, created_at)
      VALUES (?, 'win', ?, 'weekly', ?, ?)`,
@@ -609,7 +609,7 @@ describe("review window", () => {
       // before either the seat column or the membership can reference it.
       const now = new Date().toISOString();
       await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
-        .bind("plr_dm", "dm@example.com", now).run();
+        .bind("plr_dm", "dm@asyncrpg-fixtures.dev", now).run();
       await env.DB.prepare(
         `INSERT OR IGNORE INTO memberships
            (campaign_id, player_id, character_id, character_name, joined_at)
@@ -807,7 +807,7 @@ describe("review window", () => {
     beforeEach(async () => {
       const now = new Date().toISOString();
       await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
-        .bind(OTHER, "two@example.com", now).run();
+        .bind(OTHER, "two@asyncrpg-fixtures.dev", now).run();
       const joined = await stub().join(OTHER, "Two");
       await env.DB.prepare(
         `INSERT OR IGNORE INTO memberships
@@ -888,7 +888,7 @@ describe("review window", () => {
     it("does not give an incoming DM the outgoing DM's window", async () => {
       const now = new Date().toISOString();
       await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
-        .bind("plr_dm", "dm@example.com", now).run();
+        .bind("plr_dm", "dm@asyncrpg-fixtures.dev", now).run();
 
       await setSeat(env.DB, CAMPAIGN, HOST);
       // "Never hold" is the outgoing DM's preference, and it is the one setting
@@ -907,7 +907,7 @@ describe("review window", () => {
     it("gives a reverted host a clean slate, window included", async () => {
       const now = new Date().toISOString();
       await env.DB.prepare("INSERT OR IGNORE INTO players (id, email, created_at) VALUES (?,?,?)")
-        .bind("plr_dm", "dm@example.com", now).run();
+        .bind("plr_dm", "dm@asyncrpg-fixtures.dev", now).run();
       await setSeat(env.DB, CAMPAIGN, "plr_dm");
       // Long enough that the review alarm cannot fire inside this test: the
       // three windows are closed by the explicit calls below, so what is being

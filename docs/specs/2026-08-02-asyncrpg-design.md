@@ -128,7 +128,8 @@ first. An eager group moves fast; a slow group still moves.
   dormant players counted toward quorum, a half-dormant group could never reach
   it and would always wait out the full deadline.
 - Cadence options: `daily`, `weekly`, `monthly`. Changeable mid-campaign.
-- A tick **always resolves.** See §8.
+- A tick **always resolves, or the campaign visibly halts and can be resumed.**
+  It never silently stops moving. See §8.
 
 ## 5. Absence — the no-penalty promise
 
@@ -180,17 +181,33 @@ no level, no XP, and no gear treadmill to fall behind on. A player who joins at
 tick 200 starts from the same spread as one who joined at tick 1.
 
 **Not guaranteed, and deliberately so.** A player who plays more accrues more
-*story presence* — more entries in the chronicle, warmer relationships with
-NPCs, a wider reputation. That is the point of the depth features, which were
-requested precisely so that people who want to do more can. Renown feeds
-difficulty, so a well-known character faces different situations, not easier
-ones; and it is shown as a phrase rather than a score so it does not read as a
-leaderboard.
+*story presence* — more entries in the chronicle, more of the telling spent on
+them. That is the point of the depth features, which were requested precisely
+so that people who want to do more can.
+
+**What this used to say, and why it was wrong.** An earlier version of this
+section claimed the extra was "warmer relationships with NPCs, a wider
+reputation". A later review pointed out that both of those are *mechanical*:
+renown and NPC attitudes are inputs to `difficultyFor`. So optional downtime
+was buying a real edge, which makes skipping it a real cost — the promise
+inverted, in slower motion. Worse, `restoreStanding` lifts a returning player's
+renown and bonds but cannot touch the NPC's reciprocal attitude, so the gap
+from a missed month of networking was permanent.
+
+`train` and `network` therefore no longer change any mechanically relevant
+field. They record who you trained with and who you spent time with, the
+narrator is told, and it shows up in the chronicle. `research` still reveals
+threats — that is information the whole table receives, not a personal bonus —
+and `recover` still clears conditions, which removes a minus rather than adding
+a plus. `test/sim/downtime.test.ts` asserts the general form: no downtime
+activity of any kind moves attributes, skills, renown, bonds, or NPC attitudes.
 
 The distinction is between *penalty* and *difference*. Being away costs you
-nothing. Being present earns you a place in the story. A design where those two
-were identical would have nothing for the engaged player to do, which was an
-explicit requirement.
+nothing, and neither does skipping the optional parts. Being present earns you
+a place in the story and nothing else. A design where presence and absence were
+completely identical would have nothing for the engaged player to do, which was
+an explicit requirement — the answer is that what they get is narrative, and
+narrative is not a stat.
 
 
 There is also **no XP ladder to fall behind on.** Advancement is reputation and
@@ -239,15 +256,67 @@ primary evidence that the world model is real rather than decorative.
 
 ### Email (primary)
 
-- Outbound from `dm@play.cortech.online`.
-- `Reply-To: play+<token>@play.cortech.online` where `token` is an HMAC-signed
-  `(campaignId, playerId, tickId)`.
-- Inbound verification requires **all** of:
-  1. valid HMAC over the token payload;
-  2. envelope sender matches the player's registered address;
-  3. tick is current or next (replay defense).
+- Outbound from `dm@cortech.online`.
+- Every beat carries an HMAC reply capability over `(campaignId, playerId,
+  tick)` — 16 base32 characters, 60 bits of tag — minted in
+  `src/email/token.ts`.
 
-  A leaked email alone must not let a third party act as that player.
+#### Where the capability rides, and why it is not the Reply-To
+
+This was specified as `Reply-To: play+<token>@…`, which is where a capability
+belongs. Two Cloudflare constraints made that unavailable:
+
+- **Email Routing matches rules on exact addresses.** A plus-addressed reply
+  is not covered by the `rpg@cortech.online` rule, and the apex catch-all on
+  this zone is already routed to an unrelated Worker — so a plus-addressed
+  reply would be delivered somewhere else entirely. Fixing that is a zone-level
+  change owned by the domain's owner, not by this app.
+- **Email Sending rejects a caller-supplied `Message-ID`** ("Only whitelisted
+  headers and X-\* headers are accepted"), so the threading id cannot be chosen
+  by us either; it is read back off the send response.
+
+The subject code is the one carrier that survives every mail client's reply
+without a zone change, so the capability rides there:
+`[Ashfall #<token>] Tick 14 — …`. A subject is a weaker place to keep a secret
+than an address — it is quoted into forwards and shown in notifications — so
+possession of a token is deliberately **not sufficient on its own**.
+
+#### What inbound verification actually requires
+
+`src/email/inbound.ts` requires **all** of:
+
+1. **DMARC-authenticated sender.** Cloudflare Email Routing enforces
+   SPF/DKIM/DMARC before the handler runs. The envelope sender is checked
+   first, then the header `From` — the fallback is necessary because Cloudflare
+   rewrites the envelope sender of its own outbound mail to
+   `bounces@cf-bounce.<domain>`, and safe only because DMARC is precisely an
+   alignment check on the header `From` domain. Without that enforcement in
+   front, this fallback would be spoofable.
+2. **The sender is a registered player and a member of the bound campaign.**
+3. **The token authenticates the binding it resolves to** — a token edited to
+   name another player or an earlier tick no longer verifies, and is treated as
+   absent rather than as proof.
+4. **The binding's tick is current or the one just past** (replay defense); an
+   older reply bounces with a pointer to the current turn.
+
+A leaked or forwarded email alone therefore does not let a third party act as
+that player: they would also have to pass DMARC as that player's address.
+
+#### The two accepted weakenings, stated plainly
+
+- **Fresh mail from a player in exactly one campaign is accepted with no
+  token.** This is a deliberate product decision, not an oversight: "just email
+  us what you do" is the primary channel's whole appeal, and the sender is
+  already DMARC-authenticated and a known member. A player in several campaigns
+  gets no such guess and must reply to a beat.
+- **Tokens minted before this scheme, or while no secret was configured, cannot
+  be verified** and rest on the stored binding alone. Rejecting them would
+  invalidate every beat already sitting in someone's inbox; they age out with
+  their 90-day expiry.
+
+Each of spoofing, forwarding, replay, and ambiguity has a test in
+`test/integration/email-handler.test.ts`, and the token's own properties in
+`test/email/token.test.ts`.
 - Parsing: `postal-mime`, then quoted-reply stripping (`>` prefixes,
   `On … wrote:` lead-ins, `-- ` signature delimiter).
 - Threading: `In-Reply-To` / `References` keep a campaign as one mail thread.
@@ -269,14 +338,33 @@ character histories, world map summary. This is the shareable artifact.
 
 ## 8. Failure posture
 
-**The tick always resolves.** There is no state in which a campaign wedges.
+**The tick always resolves, or the campaign says out loud that it cannot.**
+There is no state in which a campaign silently wedges — which is the claim that
+actually matters, and is weaker than the one this section used to make.
 
 | Failure | Behavior |
 |---|---|
 | LLM emits invalid delta | ~~retry once with the validation error appended; then fall back to templated prose generated directly from sim events~~ — **cannot happen: there is no delta channel** (see §2). The equivalent live failure is unusable *prose*, which falls straight through to the templated path below |
+| LLM output unusable (spliced, truncated, fenced) | fall back to templated prose generated directly from sim events; tick still advances |
 | LLM unreachable / budget exceeded | same templated fallback; tick still advances |
-| Email send fails | retried; the beat remains readable on the web |
+| Email send fails | retried, then recorded in `delivery_failures` and shown to the player it was owed to; the beat remains readable on the web |
+| Inline resolve fails after an action is accepted | the action is already stored; the alarm resolves the tick instead. Late, not lost |
 | DO alarm fails | platform retries alarms |
+| A tick would violate a world invariant | rolled back whole, a "blocked" beat is written, pending actions cleared, and the tick retried on the next alarm |
+| **The same tick fails its invariants 3 times running** | **the campaign halts and stops scheduling** |
+
+That last row is the honest exception. Clearing the pending queue changes the
+inputs, so a violation caused by a player's action is genuinely fixed by
+retrying. One caused by deterministic world drift is not: the same state
+produces the same drift and the same rejection on every alarm, forever. A
+campaign that looks alive and never moves is worse than one that admits it has
+stopped, so after `BLOCKED_TICK_LIMIT` consecutive rejections it halts, reports
+the violations in its snapshot, and offers the host `resume()`.
+
+The policy is a pure function (`blockedTickPolicy`) with tests in
+`test/integration/blocked-ticks.test.ts`, including that no path through it
+reschedules indefinitely — "does not loop forever" is otherwise only observable
+by waiting forever.
 
 Cost control: per-campaign monthly token budget plus a global kill switch, both
 in D1. Exceeding either degrades narration quality — it never blocks play.

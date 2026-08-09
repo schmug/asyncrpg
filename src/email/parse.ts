@@ -136,6 +136,38 @@ export function localPart(address: string | null | undefined): string | null {
  * bound to its campaign by the threading header or subject code, and a fresh
  * mail from a player in a single campaign is unambiguous anyway.
  */
+/**
+ * Domains that can never accept mail, reserved by RFC 2606 and RFC 6761.
+ *
+ * Attempting delivery to one of these is not a risk of bouncing — it is a
+ * guaranteed hard bounce, every time, by standard. And hard bounces are what
+ * sender reputation is measured in: on 2026-08-03 this account reached an
+ * 83.5% bounce rate and a "sending may be paused" warning, because the test
+ * harnesses address their players at `@example.invalid` and the app dutifully
+ * tried to deliver to all of them.
+ *
+ * The guard belongs here rather than in the harnesses. A typo'd signup, a
+ * copy-pasted `user@example.com`, or a future test that forgets are all the
+ * same shape, and the cost of any of them is the domain's ability to send
+ * mail at all — which for this product is the product.
+ */
+const UNDELIVERABLE_TLDS = new Set(["invalid", "test", "example", "localhost"]);
+const UNDELIVERABLE_DOMAINS = new Set(["example.com", "example.net", "example.org"]);
+
+export function isUndeliverable(address: string | null | undefined): boolean {
+  if (!address) return true;
+  const bare = (/<([^>]+)>/.exec(address)?.[1] ?? address).trim().toLowerCase();
+  const at = bare.lastIndexOf("@");
+  if (at <= 0) return true;
+  const domain = bare.slice(at + 1);
+  if (!domain || domain.startsWith(".") || domain.endsWith(".")) return true;
+  if (UNDELIVERABLE_DOMAINS.has(domain)) return true;
+  const tld = domain.slice(domain.lastIndexOf(".") + 1);
+  // A bare hostname with no dot cannot be a public MX either.
+  if (!domain.includes(".")) return true;
+  return UNDELIVERABLE_TLDS.has(tld);
+}
+
 export const INBOX_LOCAL = "rpg";
 
 export function isInboxAddress(local: string | null): boolean {
