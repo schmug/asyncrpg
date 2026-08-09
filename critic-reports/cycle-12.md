@@ -1,0 +1,41 @@
+I would not pass this as professionally shippable yet. The core system is real: deterministic sim, bounded LLM role, web/email action paths, absence policy, and production E2E evidence all exist. The remaining failures are not prototype gaps, but they matter for a months-long email-first RPG: real mailbox delivery is unproven, mail capacity is a known ceiling, travel does not update the shared scene, and the chronicle still reads too stationary/repetitive over long stretches.
+
+```json
+{
+  "scores": { "product": 7, "async": 9, "narrative": 7, "ux": 7, "rigor": 8 },
+  "verdict": "fail",
+  "summary": "asyncrpg is a real playable system, not documentation theater: create, join, act, resolve, read, and email reply are implemented and production-verified. The absence promise is unusually strong in code, and the model is correctly kept out of canonical state. It is not yet a professional ship because the email-first channel is not proven in real consumer inboxes, mail capacity is a known operational limit, and the shared scene/narrative layer is still too static for a long-running tabletop campaign.",
+  "requiredFixes": [
+    {
+      "severity": "major",
+      "category": "ux",
+      "title": "Consumer inbox deliverability is still unproven",
+      "detail": "live-capture/email-e2e-output.txt proves a real two-zone Cloudflare round trip and a reply becoming a turn, but it explicitly says Gmail/Outlook spam handling is not covered. docs/deliverability.md still has Gmail and Outlook rows marked pending. Done means sign-in links, beat emails, and reply flows are seed-list tested or manually recorded for major mailbox providers with acceptable inbox placement and latency."
+    },
+    {
+      "severity": "major",
+      "category": "product",
+      "title": "Shared campaign scene does not follow travel",
+      "detail": "src/sim/actions.ts:288 only changes character.locationId on travel, while src/dm/narrate.ts:100 and src/campaign-do.ts:918 still orient the campaign and narrator from world.scene. A party can move mechanically while the shared scene, header, and model fact sheet remain anchored to the old place. Done means successful travel deterministically updates the shared scene when appropriate, handles split-party cases explicitly, and has tests proving the next prompt, app header, and narration facts agree."
+    },
+    {
+      "severity": "major",
+      "category": "product",
+      "title": "Mail capacity is not production-sized",
+      "detail": "docs/DEPLOYMENT.md documents a real account-wide Cloudflare Email Sending quota exhaustion where a 32-turn, 3-player seed run blocked later beats and sign-in links. The app records and surfaces failures, which is good degradation, but an email-first game needs capacity or admission control sized for real concurrent campaigns. Done means quota is raised or product limits, alerts, and operator dashboards prevent ordinary beta usage from exhausting the channel."
+    },
+    {
+      "severity": "major",
+      "category": "narrative",
+      "title": "Chronicle remains too repetitive and stationary",
+      "detail": "live-capture/generated-narration.txt is readable and mostly faithful, but the sampled turns repeatedly return to Peirmarket market texture, Bram/Kestrel routine beats, and similar partial-success phrasing. Combined with the static shared-scene issue, the artifact feels more like a well-written activity log than a campaign a group would retell for months. Done means long captures across multiple seeds show scene movement, stronger consequence variety, and less repeated cadence while remaining bound to simulated facts."
+    },
+    {
+      "severity": "minor",
+      "category": "ux",
+      "title": "Private-scene wording is misleading",
+      "detail": "public/index.html labels journals as 'Write a private scene' while the chronicle renderer publishes journals under 'Private scenes' on the public chronicle by default. The placeholder says it joins the chronicle, but non-technical players can still read 'private' as private from the public. Done means the UI uses 'solo scene' or otherwise states plainly before submission that the entry appears in the chronicle."
+    }
+  ]
+}
+```

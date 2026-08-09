@@ -6,14 +6,15 @@
   "description": "Asynchronous multiplayer tabletop RPG with a simulated world and an LLM dungeon master. Play by email or web.",
   "scripts": {
     "dev": "wrangler dev",
-    "deploy": "wrangler deploy",
+    "deploy": "wrangler deploy --var GIT_REVISION:$(git rev-parse HEAD)",
     "typecheck": "tsc --noEmit && tsc --noEmit -p scripts/tsconfig.json",
     "test": "vitest run",
     "test:watch": "vitest",
     "sim:soak": "tsx scripts/sim-soak.ts",
     "smoke": "node scripts/smoke.mjs",
     "ui-smoke": "node scripts/ui-smoke.mjs",
-    "critic": "node scripts/critic.mjs"
+    "critic": "node scripts/critic.mjs",
+    "sim:endurance": "tsx scripts/endurance.ts"
   },
   "devDependencies": {
     "@cloudflare/vitest-pool-workers": "^0.20.1",

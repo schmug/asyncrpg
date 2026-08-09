@@ -77,6 +77,8 @@ export interface CampaignSnapshot {
   situation: string;
   tension: number;
   deadlineAt: number | null;
+  /** The group's current clock, so the host controls can show what is set. */
+  pace: { cadence: string; quorumFraction: number };
   quorum: { need: number; have: number; active: number };
   cast: {
     characterId: string;
@@ -89,6 +91,40 @@ export interface CampaignSnapshot {
     conditions: string[];
     hasPending: boolean;
   }[];
+  /**
+   * Set when the campaign has stopped scheduling ticks because the same tick
+   * kept failing its invariants. Recoverable by the host via `resume()`.
+   */
+  halted: { since: number; consecutiveBlockedTicks: number; violations: string[] } | null;
+}
+
+/**
+ * How many consecutive invariant-rejected ticks before the campaign stops
+ * scheduling and asks for a human.
+ *
+ * More than one, because clearing the pending queue genuinely does fix the
+ * player-input case and it would be rude to halt a campaign over a single bad
+ * submission. Small, because every retry past the first is the same
+ * computation producing the same failure.
+ */
+const BLOCKED_TICK_LIMIT = 3;
+
+/**
+ * What to do after a tick, given how many consecutive ticks have been rejected.
+ *
+ * Pulled out as a pure function because the property that matters — a
+ * repeating deterministic failure eventually stops rescheduling instead of
+ * looping forever — is otherwise only observable by waiting for an alarm that
+ * never ends.
+ */
+export function blockedTickPolicy(
+  previousRuns: number,
+  outcome: "blocked" | "resolved",
+): { runs: number; reschedule: boolean; halted: boolean } {
+  if (outcome === "resolved") return { runs: 0, reschedule: true, halted: false };
+  const runs = previousRuns + 1;
+  const halted = runs >= BLOCKED_TICK_LIMIT;
+  return { runs, reschedule: !halted, halted };
 }
 
 export class CampaignDO extends DurableObject<Env> {
@@ -176,11 +212,18 @@ export class CampaignDO extends DurableObject<Env> {
           // bigger share of the bill and was entirely unmetered.
           const spent = (row?.input_tokens ?? 0) + (row?.output_tokens ?? 0);
           return spent < cap;
-        } catch {
-          // A budget-table failure must not stop the game — but it must not be
-          // invisible either, or the cap silently stops existing.
-          console.error(`budget check failed for ${campaignId}; allowing and degrading open`);
-          return true;
+        } catch (err) {
+          // Fail *closed*. This used to allow spend when the accounting was
+          // unavailable, which is the one moment a cap most needs to hold: an
+          // outage in the budget store is exactly when unbounded model spend
+          // would go unnoticed and unrecorded. "Do not stop the game" is
+          // satisfied without it — the tick still resolves, narration just
+          // degrades to templated prose and says why.
+          console.error(
+            `budget check failed for ${campaignId}; degrading to templated narration:`,
+            err instanceof Error ? err.message : String(err),
+          );
+          return false;
         }
       },
       record: async (campaignId, inputTokens, outputTokens) => {
@@ -259,7 +302,9 @@ export class CampaignDO extends DurableObject<Env> {
     this.#put("history", events.slice(-200));
 
     await this.#projectGenesis(req, state, events);
-    await this.#scheduleNextTick();
+    // The clock is NOT started here. A campaign that begins ticking before its
+    // creator is a member is one nobody can reach or repair — it just advances
+    // on its own. `startClock()` is called once creation has fully landed.
     return { tick: state.tick, place: state.scene.situation };
   }
 
@@ -273,7 +318,8 @@ export class CampaignDO extends DurableObject<Env> {
     });
     assertWorldInvariants(world);
     this.#put("world", world);
-    // A first player makes the campaign live; make sure the clock is running.
+    // A player joining an already-created campaign makes it live; for the host
+    // during creation this is a no-op, because `startClock()` follows anyway.
     await this.#scheduleNextTick();
     return {
       characterId: character.id,
@@ -330,8 +376,27 @@ export class CampaignDO extends DurableObject<Env> {
     }));
 
     if (isQuorumMet(world, stubs, this.#config())) {
-      await this.resolveTick("quorum");
-      return { accepted: true, resolvedNow: true };
+      // The action is already durably in `pending`. Resolving the tick is
+      // everything that comes *after* accepting it — narration, mail, D1
+      // projection — and all of that depends on services that can be slow or
+      // briefly unavailable. Letting a failure there propagate turns an
+      // accepted turn into a 500 and loses the player's writing, which is the
+      // worst possible trade: the expensive, irreplaceable part already
+      // succeeded.
+      //
+      // So: accept, and let the alarm resolve. The tick is late, not lost.
+      try {
+        await this.resolveTick("quorum");
+        return { accepted: true, resolvedNow: true };
+      } catch (err) {
+        console.error(
+          `inline resolve failed for ${world.campaignId} at tick ${world.tick}; ` +
+            `action is stored and the alarm will retry:`,
+          err instanceof Error ? (err.stack ?? err.message) : String(err),
+        );
+        await this.#scheduleNextTick();
+        return { accepted: true, resolvedNow: false };
+      }
     }
     return { accepted: true, resolvedNow: false };
   }
@@ -394,6 +459,30 @@ export class CampaignDO extends DurableObject<Env> {
 
   override async alarm(): Promise<void> {
     await this.resolveTick("deadline");
+    // Heal a lagging chronicle without waiting for a host to notice the
+    // banner. Projection failures were already visible and repairable by hand;
+    // "visible" is the right shape but it still leaves the public artifact
+    // wrong for as long as nobody looks. Runs after the tick so a repair can
+    // never delay canon, and swallows its own errors for the same reason —
+    // the next alarm will try again.
+    await this.#healProjection();
+  }
+
+  async #healProjection(): Promise<void> {
+    try {
+      const world = this.#get<WorldState>("world");
+      if (!world) return;
+      const open = await this.env.DB.prepare(
+        "SELECT COUNT(*) AS n FROM projection_failures WHERE campaign_id = ? AND resolved_at IS NULL",
+      )
+        .bind(world.campaignId)
+        .first<{ n: number }>();
+      if ((open?.n ?? 0) === 0) return;
+      await this.reproject();
+      console.log(`chronicle reprojected automatically for ${world.campaignId}`);
+    } catch (err) {
+      console.error("automatic reprojection failed; will retry next alarm", err);
+    }
   }
 
   // ─── the tick ──────────────────────────────────────────────────────────
@@ -432,8 +521,55 @@ export class CampaignDO extends DurableObject<Env> {
     }
 
     const history = this.#get<WorldEvent[]>("history") ?? [];
+
+    // Recaps for players coming back from a long absence must reach further
+    // than the DO's rolling event buffer. That buffer is capped so DO storage
+    // stays bounded, which is right — but a player returning after months
+    // would then get a recap built from events that all postdate the ones they
+    // actually missed, which is precisely the case the promise is about.
+    //
+    // D1 holds every projected event for the campaign, so the gap is filled
+    // from there for exactly the players who need it. Best-effort: a recap is
+    // a courtesy, and failing to build one must never stop a tick resolving.
+    const oldestRetained = history[0]?.tick ?? world.tick;
+    const acting = new Set(submitted.map((a) => a.playerId));
+    const returningFromBefore = Object.values(world.characters)
+      .filter((c) => c.presence === "offscreen" && acting.has(c.playerId))
+      .map((c) => c.lastActedTick)
+      .filter((t) => t < oldestRetained);
+
+    let recapHistory = history;
+    if (returningFromBefore.length > 0) {
+      try {
+        const from = Math.min(...returningFromBefore);
+        const older = await this.env.DB.prepare(
+          `SELECT tick, kind, summary, significance FROM events
+           WHERE campaign_id = ? AND tick > ? AND tick < ? AND significance >= 55
+           ORDER BY significance DESC LIMIT 200`,
+        )
+          .bind(world.campaignId, from, oldestRetained)
+          .all<{ tick: number; kind: string; summary: string; significance: number }>();
+        const rows = (older.results ?? []).map(
+          (e) =>
+            ({
+              tick: e.tick,
+              kind: e.kind,
+              summary: e.summary,
+              significance: e.significance,
+              actorId: null,
+              targetIds: [],
+              regionId: null,
+              data: {},
+            }) as unknown as WorldEvent,
+        );
+        if (rows.length > 0) recapHistory = [...rows, ...history];
+      } catch (err) {
+        console.error("could not widen recap history from D1", err);
+      }
+    }
+
     const before = structuredClone(world);
-    const result = runTick(world, submitted, config, { history });
+    const result = runTick(world, submitted, config, { history: recapHistory });
 
     // The sim is canon, so a tick that would corrupt it is discarded whole
     // rather than half-written. Rolling back to the last good state keeps the
@@ -451,6 +587,18 @@ export class CampaignDO extends DurableObject<Env> {
       );
       this.#put("world", before);
       this.ctx.storage.sql.exec("DELETE FROM pending");
+
+      // Clearing pending changes the inputs, so a violation caused by player
+      // actions will not recur. A violation caused by deterministic world
+      // drift will: same state, same drift, same rejection, on every alarm
+      // forever — a campaign that looks alive and never moves.
+      //
+      // So count consecutive rejections. After a few, stop rescheduling and
+      // say so out loud. A halted campaign is a bad state; a campaign quietly
+      // failing the same tick until someone notices is a worse one.
+      const policy = blockedTickPolicy(this.#get<number>("blockedRuns") ?? 0, "blocked");
+      this.#put("blockedRuns", policy.runs);
+      this.#put("blockedDetail", violations.slice(0, 5));
 
       // Canon does not advance, but the record of it must. A turn that
       // silently does nothing is indistinguishable from an outage to the
@@ -475,7 +623,17 @@ export class CampaignDO extends DurableObject<Env> {
         await this.#recordProjectionFailure(before.campaignId, before.tick, "blocked-beat", err);
       }
 
-      await this.#scheduleNextTick();
+      if (policy.reschedule) {
+        await this.#scheduleNextTick();
+      } else {
+        // Explicitly halted, not silently looping. `resume()` is the way out,
+        // and the snapshot says so to the host.
+        this.#put("haltedAt", Date.now());
+        console.error(
+          `campaign ${before.campaignId} halted after ${policy.runs} consecutive blocked ticks`,
+        );
+      }
+
       return {
         tick: before.tick,
         source: "blocked",
@@ -483,6 +641,13 @@ export class CampaignDO extends DurableObject<Env> {
         drifted: [],
         reason,
       };
+    }
+
+    // A tick got through: the campaign is not in a repeating failure.
+    if ((this.#get<number>("blockedRuns") ?? 0) > 0) {
+      this.#put("blockedRuns", 0);
+      this.#put("blockedDetail", []);
+      this.#put("haltedAt", null);
     }
 
     pruneWorld(result.state);
@@ -576,7 +741,7 @@ export class CampaignDO extends DurableObject<Env> {
         (r) => r.action.characterId === character.id && r.action.auto,
       );
 
-      await sendBeat(this.env, {
+      const sent = await sendBeat(this.env, {
         campaignId: state.campaignId,
         campaignSlug: meta.slug,
         campaignName: meta.name,
@@ -585,11 +750,73 @@ export class CampaignDO extends DurableObject<Env> {
         toEmail: member.email,
         headline,
         prose: beat.prose,
-        prompt: promptFor(character, state),
+        // An offscreen player is not being asked anything. Sending them "What
+        // do you do?" every turn is the social half of the penalty the design
+        // forbids: their character has quietly stepped out of the story, and
+        // the mail still arrives weekly asking them to take a turn they are
+        // not holding up. Nothing else changes — they keep receiving the beat,
+        // because the story is still theirs to read and coming back must stay
+        // one reply away.
+        prompt:
+          character.presence === "offscreen"
+            ? `${character.name} is offscreen for now. Nothing needs doing — ` +
+              `reply whenever you feel like rejoining, and you will get a recap.`
+            : promptFor(character, state),
         recap: result.recaps[character.id],
         actedForYou: auto ? auto.action.intent : null,
         scan,
+        offscreen: character.presence === "offscreen",
       });
+
+      // A beat that did not reach its player is a lost turn on the primary
+      // channel. Record it against that player so the app can tell them
+      // plainly, and clear the moment a later beat gets through.
+      await this.#recordDelivery(
+        state.campaignId,
+        member.player_id,
+        state.tick,
+        // A suppressed send is not a delivery failure — nothing is wrong and
+        // nothing needs an operator. Recording it as one would bury real
+        // outages under test traffic.
+        sent.ok || "suppressed" in sent ? null : sent.error,
+      );
+    }
+  }
+
+  async #recordDelivery(
+    campaignId: string,
+    playerId: string,
+    tick: number,
+    /** Null when the beat went out; otherwise the provider's own words. */
+    error: string | null,
+  ): Promise<void> {
+    try {
+      if (error === null) {
+        await this.env.DB.prepare(
+          `UPDATE delivery_failures SET resolved_at = ?
+           WHERE campaign_id = ? AND player_id = ? AND resolved_at IS NULL`,
+        )
+          .bind(new Date().toISOString(), campaignId, playerId)
+          .run();
+        return;
+      }
+      await this.env.DB.prepare(
+        `INSERT INTO delivery_failures (id, campaign_id, player_id, tick, kind, detail, created_at)
+         VALUES (?, ?, ?, ?, 'beat', ?, ?)`,
+      )
+        .bind(
+          `dlv_${campaignId}_${playerId}_${tick}`,
+          campaignId,
+          playerId,
+          tick,
+          error.slice(0, 300),
+          new Date().toISOString(),
+        )
+        .run();
+    } catch (err) {
+      // Bookkeeping about a failure must never become a second failure that
+      // stops the fan-out; the remaining players still need their beat.
+      console.error("delivery bookkeeping failed", err);
     }
   }
 
@@ -723,6 +950,7 @@ export class CampaignDO extends DurableObject<Env> {
       situation: world.scene.situation,
       tension: Math.round(world.scene.tension),
       deadlineAt: this.#get<number>("deadlineAt"),
+      pace: { cadence: config.cadence, quorumFraction: config.quorumFraction },
       quorum: {
         need: quorumSize(world, config),
         have: [...pendingIds].filter((id) => active.some((c) => c.playerId === id)).length,
@@ -738,7 +966,67 @@ export class CampaignDO extends DurableObject<Env> {
         conditions: c.conditions,
         hasPending: pendingIds.has(c.playerId),
       })),
+      halted: this.#haltState(),
     };
+  }
+
+  #haltState(): CampaignSnapshot["halted"] {
+    const since = this.#get<number>("haltedAt");
+    if (!since) return null;
+    return {
+      since,
+      consecutiveBlockedTicks: this.#get<number>("blockedRuns") ?? 0,
+      violations: this.#get<string[]>("blockedDetail") ?? [],
+    };
+  }
+
+  /**
+   * Take a halted campaign off the bench.
+   *
+   * Deliberately not automatic. The counter exists because retrying was not
+   * working, so the only honest resume is one a person asked for after looking
+   * at the violations.
+   */
+  /**
+   * Change the group's clock mid-campaign.
+   *
+   * Groups discover their real pace by playing: a table that signed up for
+   * daily and is managing weekly should be able to say so without starting
+   * over. The pending deadline is recomputed from the *current* tick, so
+   * slowing down does not strand a deadline that has already passed and
+   * speeding up does not fire one instantly.
+   */
+  async setPace(
+    next: { cadence?: Cadence; quorumFraction?: number },
+  ): Promise<{ cadence: Cadence; quorumFraction: number }> {
+    const config = this.#config();
+    const cadence = next.cadence ?? config.cadence;
+    const quorumFraction =
+      next.quorumFraction === undefined
+        ? config.quorumFraction
+        : Math.min(1, Math.max(0.1, next.quorumFraction));
+
+    this.#put("config", { ...config, cadence, quorumFraction });
+    await this.#scheduleNextTick();
+    return { cadence, quorumFraction };
+  }
+
+  /**
+   * Begin advancing. Separate from `init` so creation can put the campaign in
+   * the creator's hands before it starts moving without them. Idempotent.
+   */
+  async startClock(): Promise<void> {
+    await this.#scheduleNextTick();
+  }
+
+  async resume(): Promise<{ resumed: boolean; wasHalted: boolean }> {
+    const wasHalted = Boolean(this.#get<number>("haltedAt"));
+    this.#put("blockedRuns", 0);
+    this.#put("blockedDetail", []);
+    this.#put("haltedAt", null);
+    this.ctx.storage.sql.exec("DELETE FROM pending");
+    await this.#scheduleNextTick();
+    return { resumed: true, wasHalted };
   }
 
   /**

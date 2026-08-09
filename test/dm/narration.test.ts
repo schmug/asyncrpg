@@ -1,7 +1,13 @@
 import { beforeEach, describe, expect, it } from "vitest";
 import { templatedBeat } from "../../src/dm/fallback";
 import { parseIntentKeywords, resolveTarget } from "../../src/dm/intent";
-import { narrateBeat, UNLIMITED_BUDGET } from "../../src/dm/narrate";
+import {
+  looksCorrupted,
+  narrateBeat,
+  normalizeProse,
+  outOfRepertoire,
+  UNLIMITED_BUDGET,
+} from "../../src/dm/narrate";
 import type { DmConfig } from "../../src/dm/narrate";
 import { joinCharacter } from "../../src/sim/character";
 import { generateWorld } from "../../src/sim/genesis";
@@ -377,6 +383,142 @@ describe("narrateBeat degradation", () => {
     } finally {
       globalThis.fetch = original;
     }
+  });
+
+  it("strips a stray markdown fence instead of shipping it into canon", async () => {
+    const state = world();
+    const r = runTick(state, [act(state, "p0", "I look around.")], DEFAULT_CAMPAIGN_CONFIG);
+    const original = globalThis.fetch;
+    // Real corruption observed on the public chronicle: the model closed a
+    // fence it had opened outside the JSON string, and the backticks rode all
+    // the way through to the reader.
+    const fenced =
+      "Kestrel walked into the gap between the two lines and stood there, empty-handed, " +
+      "refusing every shout to move. Braemburgh's war paused because a traveller with " +
+      "reasons of their own wouldn't step aside.```";
+    globalThis.fetch = (async () =>
+      new Response(
+        JSON.stringify({
+          id: "msg_1",
+          type: "message",
+          role: "assistant",
+          model: "claude-sonnet-5",
+          stop_reason: "end_turn",
+          content: [{ type: "text", text: JSON.stringify({ prose: fenced, situation: "war```" }) }],
+          usage: { input_tokens: 100, output_tokens: 200 },
+        }),
+        { status: 200, headers: { "content-type": "application/json" } },
+      )) as typeof fetch;
+    try {
+      const beat = await narrateBeat(
+        { ...NO_KEY, apiKey: "sk-ant-test" },
+        state,
+        r.events,
+        r.resolutions,
+        UNLIMITED_BUDGET,
+      );
+      // The writing is sound; only the wrapper was wrong. Falling back to
+      // templated prose here would discard a good beat over three backticks.
+      expect(beat.source).toBe("model");
+      expect(beat.prose).not.toContain("`");
+      expect(beat.situation).not.toContain("`");
+      expect(beat.prose).toMatch(/wouldn't step aside\.$/);
+    } finally {
+      globalThis.fetch = original;
+    }
+  });
+
+  it.each([
+    ["digits", "It was over before he'd finished.732 and the room went quiet again."],
+    ["a lowercase splice", "The light went out of the evening.ot. of it.was about to boil over."],
+    ["a base64-looking token", "she knows the moment it does.MjM Kestrel Vane, elsewhere, kept on."],
+  ])("treats a splice against terminal punctuation as corruption — %s", (_label, sample) => {
+    // Every corruption this product has shipped has had this one shape. The
+    // three samples are verbatim from three different production captures.
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    ["a decimal", "The tithe came to 1.5 measures of grain, and no more than that."],
+    ["an ellipsis", "Bram counted it twice... then counted it a third time to be sure."],
+    ["an initialism", "He had it from a man who swore he'd seen it, e.g. the drover."],
+    ["ordinary sentences", "It rained. Then it stopped. Nobody said anything for a while."],
+  ])("does not fire on legitimate prose — %s", (_label, sample) => {
+    expect(looksCorrupted(sample)).toBe(false);
+  });
+
+  it("strips the model's own editorial aside out of prose", () => {
+    // Verbatim from production: the model corrected itself in comment syntax
+    // and the note rode all the way to the public chronicle.
+    const sample =
+      "Kestrel walked away with more than they came for.// wait, remove that fragment.";
+    expect(normalizeProse(sample)).toBe("Kestrel walked away with more than they came for.");
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    "As an AI I cannot continue this scene.",
+    "Let me rewrite that opening line.",
+    "[note: check the faction name here]",
+    "Ignore the previous paragraph.",
+  ])("treats breaking frame as corruption — %s", (sample) => {
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    ["a run of soft hyphens", "who thanked him, who didn't." + "\u00ad".repeat(149)],
+    ["an ideographic space", "The snow came down thin\u3000and dry over the road."],
+    ["CJK ideographs", "He splints a wrist here, packs a wound there. \u81f3\u6b64\u5b8c\u6210"],
+    ["a stray closing brace", "He went from stall to stall, and found nothing at all }"],
+    ["a bracket tail", "an old habit of watching the doors [1]"],
+  ])("rejects out-of-repertoire prose — %s", (_label, sample) => {
+    // All five verbatim from the cycle-8 production capture. Enumerating bad
+    // shapes lost five cycles running; the rule is now a closed allowlist of
+    // what English prose is made of.
+    expect(looksCorrupted(sample)).toBe(true);
+  });
+
+  it.each([
+    "The tithe came to 1.5 measures — no more, and he said so plainly.",
+    "\u201cWho sent you?\u201d she asked. Nobody answered; the fire cracked.",
+    "Sela of the Weir crossed the S\u00f6dermark at dusk, cold to the bone\u2026",
+    "Trade was good: 60% of the stalls were full, and the rest were coming.",
+  ])("accepts ordinary prose with real punctuation — %s", (sample) => {
+    expect(looksCorrupted(sample)).toBe(false);
+    expect(outOfRepertoire(sample)).toBeNull();
+  });
+
+  it("strips an incidental invisible rather than discarding a good beat", () => {
+    // One soft hyphen is a typographic accident; a run of them is a generation
+    // that came apart. The first is repaired, the second is rejected.
+    expect(normalizeProse("well\u00adworn boots")).toBe("wellworn boots");
+    expect(looksCorrupted("well\u00adworn boots")).toBe(false);
+  });
+
+  it("rewrites escape sequences the model wrote as literal text", () => {
+    // Observed on the public chronicle: the model meant a line break, was
+    // already inside a JSON string, and escaped it wrongly.
+    expect(normalizeProse("gets repeated at supper tables for a week.//n")).toBe(
+      "gets repeated at supper tables for a week.",
+    );
+    expect(normalizeProse("He turned away.//nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+    expect(normalizeProse("He turned away.\\nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+    expect(normalizeProse("He turned away.\\\\nThe next morning")).toBe(
+      "He turned away.\nThe next morning",
+    );
+  });
+
+  it("leaves ordinary prose containing slashes and words alone", () => {
+    // The guard must not eat real writing. "n" starting a word after a slash
+    // is the dangerous case: "and/nor", a path, a fraction.
+    const fine =
+      "The tithe was 2/3 of the harvest, and/nor did anyone argue. " +
+      "He kept a note in his ledger marked north/northeast.";
+    expect(normalizeProse(fine)).toBe(fine);
   });
 
   it("does not mistake ordinary prose for corruption", async () => {

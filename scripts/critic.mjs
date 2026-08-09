@@ -37,15 +37,38 @@ const EVIDENCE = [
   { cmd: "node", args: ["scripts/ui-smoke.mjs", BASE], file: "ui-smoke-output.txt" },
   { cmd: "node", args: ["scripts/email-e2e.mjs", BASE], file: "email-e2e-output.txt" },
   { cmd: "npx", args: ["tsx", "scripts/sim-soak.ts", "--ticks", "1000"], file: "sim-soak-output.txt" },
+  { cmd: "npx", args: ["tsx", "scripts/endurance.ts", "--ticks", "60"], file: "endurance-output.txt" },
   { cmd: "node", args: ["scripts/dump-narration.mjs", BASE, DEMO_SLUG], file: "generated-narration.txt" },
 ];
 const COPY_DIRS = ["critic-reports/ui"];
+// Manual evidence that cannot be produced by a script — the last mail hop into
+// a third-party inbox. Carried into the bundle so the critic reads the recorded
+// result rather than assuming the check was never made.
+const COPY_FILES = [["docs/deliverability.md", "deliverability.md"]];
 const CRITIC = { cmd: "codex", args: ["exec", "--skip-git-repo-check", "--sandbox", "read-only"] };
 // ─────────────────────────────────────────────────────────────────────────
 
 const cycle = String(process.argv[2] ?? "0").padStart(2, "0");
 const repoRoot = process.cwd();
 const work = join(tmpdir(), `critic-${cycle}-${Date.now()}`);
+
+// The critic reads a clean clone of HEAD, but the gates and the evidence
+// commands below run in *this* working tree — so anything uncommitted is
+// invisible to the reviewer while still shaping the evidence it reads. Cycle 3
+// lost a blocker to exactly this: an unfinished test sat in the tree during
+// capture, `npm run typecheck` and `npm test` recorded failures for code the
+// clone did not contain, and the critic quite reasonably reported a red gate.
+// Refuse to start rather than spend another 40-minute cycle on an artifact.
+const dirty = execFileSync("git", ["status", "--porcelain"], { encoding: "utf8" }).trim();
+if (dirty && process.argv[3] !== "--allow-dirty") {
+  console.error(
+    `[critic] refusing to run: the working tree has uncommitted changes.\n` +
+      `The gates and evidence below run here, so these files would be measured ` +
+      `but not reviewed:\n${dirty}\n\n` +
+      `Commit (and deploy) first, or pass --allow-dirty if you accept the skew.`,
+  );
+  process.exit(3);
+}
 
 execFileSync("git", ["clone", "--depth", "1", "--quiet", `file://${repoRoot}`, work]);
 
@@ -63,13 +86,35 @@ mkdirSync(cap, { recursive: true });
 // Gate evidence: the critic's sandbox has no network and no node_modules, so
 // prove the gates ran on the exact revision under review.
 const sha = tryRun("git", ["rev-parse", "HEAD"]).trim();
+
+// Ask the deployment which revision it was built from, and say plainly whether
+// it matches the one being reviewed. Cycle 1 produced a false finding from a
+// skew nobody could see; a reviewer should not have to take this on trust.
+let deployed = "unreachable";
+try {
+  const res = await fetch(`${BASE}/api/health`);
+  deployed = (await res.json()).revision ?? "unknown";
+} catch (err) {
+  deployed = `unreachable (${err.message})`;
+}
+const skew =
+  deployed === sha
+    ? "MATCH — the deployment measured below was built from the revision under review"
+    : `SKEW — reviewing ${sha} but ${BASE} is serving ${deployed}. ` +
+      `Findings that depend on live behaviour may not correspond to this source tree.`;
+
 writeFileSync(
   join(cap, "gates.txt"),
   [
     `revision under review: ${sha}`,
+    `revision deployed at ${BASE}: ${deployed}`,
+    `provenance: ${skew}`,
     `captured at: (see timings.json)`,
     `\n$ npm run typecheck\n${tryRun("npm", ["run", "typecheck"])}`,
     `\n$ npm test\n${tryRun("npm", ["test"])}`,
+    // Dependency posture is part of the security story and was invisible in
+    // the bundle: a reviewer could see the code but not what it pulls in.
+    `\n$ npm audit --omit=dev\n${tryRun("npm", ["audit", "--omit=dev"], 120_000)}`,
     `\n$ gh run list (GitHub Actions CI)\n${tryRun("gh", ["run", "list", "--limit", "10"])}`,
     `\n$ git log --oneline -20\n${tryRun("git", ["log", "--oneline", "-20"])}`,
     // Cycle 1 produced a false finding because the cloned repo and the live
@@ -111,6 +156,13 @@ for (const step of EVIDENCE) {
 for (const dir of COPY_DIRS) {
   try {
     cpSync(dir, join(cap, dir.split("/").pop()), { recursive: true });
+  } catch {
+    /* optional */
+  }
+}
+for (const [src, dest] of COPY_FILES) {
+  try {
+    cpSync(src, join(cap, dest));
   } catch {
     /* optional */
   }

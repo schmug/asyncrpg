@@ -27,6 +27,17 @@ export const SKILLS = [
   "performance",
 ] as const;
 
+/**
+ * The pool a character's tendencies are drawn from when a player does not
+ * write their own.
+ *
+ * It has to be comfortably larger than a table's worth of draws. With six
+ * entries and two per character, a party of three drew every option and
+ * collided constantly: the demo world gave both a hedge-doctor and a marsh
+ * guide "cannot walk past a locked door", and because the narrator is told a
+ * character's tendencies every tick, it dutifully wrote the same line about
+ * both of them, in a marsh, for seven turns running.
+ */
 const DEFAULT_TENDENCIES = [
   "looks after the people nearest to hand",
   "would rather talk than fight",
@@ -34,7 +45,81 @@ const DEFAULT_TENDENCIES = [
   "keeps their word even when it costs",
   "trusts their own eyes over any report",
   "takes the careful road",
+  "remembers every debt, owed and owing",
+  "speaks plainly when tact would serve better",
+  "gives away more than they can spare",
+  "needs to know how a thing works before trusting it",
+  "counts the exits in every room",
+  "cannot let an unfair thing stand unremarked",
+  "saves the last of everything for later",
+  "tells the story better than it happened",
+  "distrusts anyone who is never afraid",
+  "works until the work is finished, or they are",
 ];
+
+/**
+ * Two tendencies nobody else at the table already has, where that is possible.
+ *
+ * Deterministic: the shuffle comes from the character's own seed, and the
+ * exclusion set is read from world state, so a replay of the same joins in the
+ * same order produces the same characters. When the pool is exhausted — a very
+ * large party — it falls back to allowing repeats rather than leaving a
+ * character with nothing, because a shared tendency is a blemish and an empty
+ * one is a bug.
+ */
+function drawTendencies(state: WorldState, rng: Rng): string[] {
+  const taken = new Set(
+    Object.values(state.characters).flatMap((c) => c.tendencies),
+  );
+  const shuffled = rng.shuffle(DEFAULT_TENDENCIES);
+  const fresh = shuffled.filter((t) => !taken.has(t));
+  return (fresh.length >= 2 ? fresh : shuffled).slice(0, 2);
+}
+
+/**
+ * Bring a returning character back to the table as an equal.
+ *
+ * The no-penalty promise held mechanically — nothing was taken away while they
+ * were gone — but not socially. Renown and bonds only ever accrue through
+ * *acting*, so a player who missed a month came back to a party that had grown
+ * closer and better known without them. Nothing was lost; they were simply
+ * behind, which is the same disadvantage wearing a different coat.
+ *
+ * So on return, standing is lifted to the middle of the party — never above
+ * it. A returning player is not rewarded for absence and cannot overtake the
+ * people who showed up; they are merely no longer starting from behind. The
+ * people who played still have the story: they did the things, and the
+ * chronicle says so permanently. That is the asymmetry this design wants —
+ * presence earns narrative, not power.
+ */
+export function restoreStanding(state: WorldState, character: Character): void {
+  const others = Object.values(state.characters).filter((c) => c.id !== character.id);
+  if (others.length === 0) return;
+
+  const median = (values: number[]): number => {
+    if (values.length === 0) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const mid = Math.floor(sorted.length / 2);
+    return sorted.length % 2 === 0 ? (sorted[mid - 1]! + sorted[mid]!) / 2 : sorted[mid]!;
+  };
+
+  character.renown = Math.max(character.renown, Math.round(median(others.map((c) => c.renown))));
+
+  // Bonds are per-target, so parity is judged per-target too: for each person
+  // the rest of the party knows, the returning character is brought up to the
+  // party's middle regard for them — again, never past it.
+  const targets = new Set(others.flatMap((c) => Object.keys(c.bonds)));
+  for (const target of targets) {
+    if (target === character.id) continue;
+    const held = others
+      .filter((c) => c.id !== target && c.bonds[target] !== undefined)
+      .map((c) => c.bonds[target]!);
+    if (held.length === 0) continue;
+    const parity = Math.round(median(held));
+    const current = character.bonds[target] ?? 0;
+    if (parity > current) character.bonds[target] = parity;
+  }
+}
 
 export interface JoinRequest {
   playerId: PlayerId;
@@ -82,7 +167,7 @@ export function joinCharacter(state: WorldState, req: JoinRequest): Character {
     skills,
     tendencies:
       req.tendencies?.filter((t) => t.trim().length > 0).slice(0, 4) ??
-      rng.shuffle(DEFAULT_TENDENCIES).slice(0, 2),
+      drawTendencies(state, rng),
     bonds: {},
     renown: 5,
     conditions: [],

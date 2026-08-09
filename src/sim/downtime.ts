@@ -6,17 +6,28 @@
  * downtime raised attributes or skills, then skipping it would be a penalty,
  * and the no-penalty promise would be a lie told in slower motion.
  *
- * So downtime moves knowledge, relationships, and conditions — never
- * attributes, never skills. You learn things, you become known to people, you
- * recover from what the world did to you. An engaged player ends up with a
- * richer position in the story and more entries in the chronicle; they do not
- * end up with a better character sheet.
+ * That constraint originally stopped at attributes and skills, and it was not
+ * far enough. `train` raised renown and `network` moved both a character's
+ * bond and the NPC's reciprocal attitude — and all three feed `difficultyFor`.
+ * So an optional activity was a mechanical edge, which makes skipping it a
+ * mechanical cost. Worse, `restoreStanding` could not undo the NPC's half of a
+ * relationship, so a returning player stayed permanently behind.
+ *
+ * Downtime now moves exactly two things: **knowledge** (`research` can reveal
+ * a threat, which is information the whole table gets, not a personal bonus)
+ * and **conditions** (`recover` clears what the world did to you, which is
+ * removing a minus rather than adding a plus).
+ *
+ * Everything else it produces is *story*: a line in the chronicle, a fact the
+ * narrator is handed, something to write a journal entry about. An engaged
+ * player ends up more present in the telling. They do not end up harder to
+ * beat.
  *
  * Resolves immediately, deterministically, with no inference call.
  */
 
 import { EventLog } from "./events";
-import { clamp } from "./invariants";
+
 import { Rng, seedFrom } from "./prng";
 import { DOWNTIME_KINDS } from "./types";
 import type { DowntimeKind, EntityId, WorldEvent, WorldState } from "./types";
@@ -93,9 +104,18 @@ export function resolveDowntime(
     }
 
     case "train": {
-      // Explicitly not a stat gain. Practising in public is how people come to
-      // know your name, which is the only thing that accumulates here.
-      character.renown = clamp(character.renown + (1 - character.renown / 100) * 2, 0, 100);
+      // Deliberately changes nothing.
+      //
+      // This used to raise renown, on the reasoning that practising in public
+      // is how people come to know your name. But renown is a mechanical input
+      // to `difficultyFor`, so that made an *optional* activity into a real
+      // advantage — and therefore made skipping it a real cost, which is the
+      // promise inverted. A player with a spare ten minutes was buying an edge
+      // over a player without one.
+      //
+      // What downtime buys is presence in the story: this shows up in the
+      // chronicle and gives the narrator something to write about. That is the
+      // whole of it, and it is what the product has always claimed.
       outcome = detail ? `practised ${detail} where people could see` : "practised in the yard";
       break;
     }
@@ -107,9 +127,14 @@ export function resolveDowntime(
       const pool = local.length > 0 ? local : Object.values(state.npcs).filter((n) => n.alive);
       const target = (req.targetId ? state.npcs[req.targetId] : undefined) ?? (pool.length ? rng.pick(pool) : undefined);
       if (target?.alive) {
-        const shift = rng.int(3, 9);
-        target.attitudes[character.id] = clamp((target.attitudes[character.id] ?? 0) + shift, -100, 100);
-        character.bonds[target.id] = clamp((character.bonds[target.id] ?? 0) + shift, -100, 100);
+        // Also deliberately changes nothing. This used to move both the NPC's
+        // attitude and the character's bond, and both feed `difficultyFor` —
+        // so the player who networked every week arrived at every negotiation
+        // with a standing edge, and `restoreStanding` could not undo it,
+        // because it never touched the NPC's side of the relationship at all.
+        //
+        // Who you spent time with is a fact about the story, and the narrator
+        // is told about it. It is not a bonus.
         outcome = `spent time with ${target.name}`;
       } else {
         outcome = "drank alone; nobody worth knowing was about";

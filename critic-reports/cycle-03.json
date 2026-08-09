@@ -1,0 +1,76 @@
+{
+  "scores": {
+    "product": 7,
+    "async": 7,
+    "narrative": 6,
+    "ux": 7,
+    "rigor": 6
+  },
+  "verdict": "fail",
+  "summary": "asyncrpg is a serious prototype with a real deterministic simulation, invite-based multiplayer, a working web loop, a public chronicle, and unusually broad smoke/email evidence. It is not professionally shippable yet: the reviewed gate fails, the live narration contains visible model artifacts, the email/security design diverges from the spec, and the product still feels like a sparse beta rather than something I would trust a non-technical group to play for months. The core architecture is promising, but a false pass here would hide material release risks.",
+  "requiredFixes": [
+    {
+      "severity": "blocker",
+      "category": "rigor",
+      "title": "Reviewed gate is red and not clean",
+      "detail": "live-capture/gates.txt:4-76 records nonzero typecheck and test runs, and live-capture/gates.txt:108-109 says an uncommitted health test was present during capture. The clean checkout I inspected does not contain that test, while src/index.ts:117-119 and live-capture/health.txt show /api/health still omits revision. Done means the committed tree has a revision health contract, local gates pass from a clean checkout, and the live deployment proves which commit is serving."
+    },
+    {
+      "severity": "blocker",
+      "category": "narrative",
+      "title": "Production prose contains visible corruption",
+      "detail": "live-capture/generated-narration.txt:25,36,60,84 and live-capture/chronicle-demo.html.txt contain raw closing code-fence artifacts embedded in stored prose. src/dm/narrate.ts:161-177 rejects some fused-sentence corruption but not this class. Done means model output validation rejects markdown/code-fence artifacts and a fresh multi-turn capture shows clean prose throughout."
+    },
+    {
+      "severity": "major",
+      "category": "async",
+      "title": "Tick-always-resolves still has a blocked-state exception",
+      "detail": "src/campaign-do.ts:440-484 rolls back on invariant failure, clears pending actions, writes a blocked beat, and returns without advancing tick. If deterministic world drift caused the invariant failure, the next alarm can repeat the same bad tick forever. Done means every alarm either advances canon or moves the campaign into an explicit recoverable admin state that cannot silently loop."
+    },
+    {
+      "severity": "major",
+      "category": "async",
+      "title": "Absence is mechanically safe but socially unequal",
+      "detail": "src/sim/tick.ts:120-178 correctly moves quiet characters from drifting to offscreen and excludes them from quorum, and src/sim/actions.ts:312-324 prevents auto-action harm. But active play and downtime still accrue renown, bonds, attitudes, and narrative centrality in src/sim/actions.ts:312-319 and src/sim/downtime.ts:95-113. Done means either implement explicit social re-entry/catch-up affordances or narrow the user-facing no-penalty promise so busy players understand they may return socially less connected."
+    },
+    {
+      "severity": "major",
+      "category": "product",
+      "title": "Primary email channel is not proven for real inboxes",
+      "detail": "live-capture/email-e2e-output.txt:24-31 proves a valuable two-zone Cloudflare loopback, but lines 33-34 explicitly say Gmail/Outlook deliverability and spam placement are not covered. Since email is the primary play surface, this is not optional. Done means seed-list deliverability checks, visible delivery failure state, and a tested recovery path when sign-in or beat emails do not arrive."
+    },
+    {
+      "severity": "major",
+      "category": "rigor",
+      "title": "Reply authentication diverges from the spec",
+      "detail": "docs/specs/2026-08-02-asyncrpg-design.md:196-203 requires an HMAC Reply-To token plus sender match and tick check. The implementation uses DB reply bindings and subject codes, then permits fresh mail from a player in exactly one campaign in src/email/inbound.ts:143-156, and outbound binding insert failure degrades to weaker routing in src/email/outbound.ts:168-176. Done means either implement the cryptographic capability or update the spec with a threat model and tests proving the replacement resists spoofing, forwarding, replay, and ambiguity."
+    },
+    {
+      "severity": "major",
+      "category": "ux",
+      "title": "Mobile UX is usable but not professional RPG quality",
+      "detail": "The screenshots show accessible touch targets and a working mobile flow, but the app is sparse: mostly sign-in, forms, a party list, and collapsible side actions. It lacks a polished first-run path, email preview/recovery guidance, stronger current-canon orientation, and richer campaign affordances for non-technical groups. Done means a first session makes invite, email reply, current story, absence behavior, and next action obvious without documentation."
+    },
+    {
+      "severity": "major",
+      "category": "narrative",
+      "title": "Chronicle is closer to a ledger than a months-long artifact",
+      "detail": "The sim is real and the prose is often readable, but live-capture/generated-narration.txt:91-101 shows turning points as flat event lines, and the chronicle screenshots are long stacks of turns plus dossiers. The world has consequences, but not yet enough curation, arcs, summaries, or memorable structure for months of group reference. Done means multi-campaign captures where the chronicle reads as an organized campaign history, not just resolved events in order."
+    },
+    {
+      "severity": "major",
+      "category": "rigor",
+      "title": "Production security posture has unresolved environment drift",
+      "detail": "src/index.ts sets a strict HSTS policy, but live-capture/health.txt serves strict-transport-security: max-age=0. CSP also permits Cloudflare-injected script because of zone behavior. Done means production headers are gated against intended policy or the deployment environment is explicitly configured and documented so security-relevant drift is not normalized."
+    },
+    {
+      "severity": "minor",
+      "category": "product",
+      "title": "Public docs still describe removed model delta flow",
+      "detail": "README.md:28-31 and README.md:63-64 still say model-proposed state deltas are validated/rejected, while src/campaign-do.ts:502-508 and src/dm/narrate.ts show there is no state-delta channel. The implementation is arguably stronger, but the documentation is stale. Done means README and architecture diagrams match the actual no-delta design."
+    }
+  ],
+  "cycle": 3,
+  "revision": "221b48a34324dfa9a83f7fad03d0c35ab24f8d85",
+  "capturedAt": "2026-08-02T18:47:50.345Z"
+}
