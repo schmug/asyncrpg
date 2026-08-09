@@ -98,7 +98,11 @@ function beat(overrides: Partial<BeatMail> = {}): BeatMail {
     campaignName: "Ashfall",
     tick: 7,
     playerId: "plr_1",
-    toEmail: "player@example.com",
+    // Not an RFC-reserved address: sendBeat suppresses provably undeliverable
+    // addresses (example.com, .test, …) before the EMAIL binding is reached,
+    // and these tests need the send to happen. EMAIL is mocked above, so no
+    // real delivery is possible regardless of the domain.
+    toEmail: "player@asyncrpg-fixtures.dev",
     headline: "The envoy",
     prose: "Nothing recognisable happened at all.",
     prompt: "What do you do?",
@@ -453,12 +457,13 @@ describe("beat mail — existing send behaviour is untouched", () => {
   it("captures the assigned Message-ID and writes the reply binding", async () => {
     const prose = "The Ashen Coil sent word.";
     const result = await sendBeat(env, beat({ prose, scan: scanProse(prose, world()) }));
-    expect(result).not.toBeNull();
+    expect(result.ok).toBe(true);
+    if (!result.ok) throw new Error(`send failed: ${result.error}`);
 
     const row = await runtime.DB.prepare(
       "SELECT message_id, campaign_id, player_id, tick FROM reply_bindings WHERE code = ?",
     )
-      .bind(result!.code)
+      .bind(result.code)
       .first<{ message_id: string; campaign_id: string; player_id: string; tick: number }>();
 
     expect(row?.message_id).toBe("assigned-1@mail.example");
